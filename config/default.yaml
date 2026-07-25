@@ -13,7 +13,7 @@
 # ================================================================
 
 # ================================================================
-# 📡 SERVER — Cấu hình máy chủ chính
+# SERVER — Cấu hình máy chủ chính
 # ================================================================
 # Server lắng nghe kết nối từ client/người dùng.
 # • listen: cổng HTTPS chính (443 là chuẩn)
@@ -29,7 +29,7 @@ server:
   max_header_bytes: 65536            # Giới hạn header 64KB (chống tấn công header lớn)
 
 # ================================================================
-# 🔐 TLS — Chứng chỉ SSL/HTTPS
+# TLS — Chứng chỉ SSL/HTTPS
 # ================================================================
 # Mã hóa kết nối giữa client và server.
 # • Bật TLS để sử dụng HTTPS (khuyến nghị luôn bật)
@@ -37,14 +37,14 @@ server:
 # • Hỗ trợ TLS 1.2 và 1.3
 tls:
   enabled: true                      # true = bật HTTPS | false = chỉ HTTP
-  cert_file: "/etc/mango/cert.pem"   # Đường dẫn file chứng chỉ SSL
-  key_file: "/etc/mango/key.pem"     # Đường dẫn file khóa riêng SSL
+  cert_file: "certs/cert.pem"        # Đường dẫn file chứng chỉ SSL
+  key_file: "certs/key.pem"          # Đường dẫn file khóa riêng SSL
   auto_cert: false                   # true = tự động lấy cert từ Let's Encrypt
   acme_email: ""                     # Email cho Let's Encrypt (nếu auto_cert = true)
   min_version: "1.2"                 # Phiên bản TLS tối thiểu: "1.2" hoặc "1.3"
 
 # ================================================================
-# 🌐 DOMAINS — Danh sách domain được bảo vệ
+# DOMAINS — Danh sách domain được bảo vệ
 # ================================================================
 # Mỗi domain trỏ về một backend (server gốc).
 # Mango Shield đứng giữa client và backend, lọc traffic xấu.
@@ -54,16 +54,16 @@ tls:
 domains:
   - name: "example.com"              # Tên domain cần bảo vệ
     upstreams:
-        - url:  "http://127.0.0.1:8080" # Địa chỉ server gốc (nội bộ)
-    ssl: false                       # Backend có dùng HTTPS không
+      - url: "http://127.0.0.1:8080"  # Địa chỉ server gốc (nội bộ)
+    ssl: false                        # Backend có dùng HTTPS không
 
   # Thêm domain khác:
   # - name: "api.example.com"
   #   upstreams:
-        - url:  "http://127.0.0.1:3000"
+  #     - url: "http://127.0.0.1:3000"
 
 # ================================================================
-# 🔌 PROXY — Cấu hình reverse proxy
+# PROXY — Cấu hình reverse proxy
 # ================================================================
 # Proxy chuyển tiếp request từ client đến backend.
 # • connect_timeout: thời gian chờ kết nối đến backend
@@ -77,7 +77,7 @@ proxy:
   websocket: true                    # Hỗ trợ WebSocket pass-through
 
 # ================================================================
-# 🛡️ PROTECTION — Cấu hình bảo vệ chính
+# PROTECTION — Cấu hình bảo vệ chính
 # ================================================================
 # Đây là phần QUAN TRỌNG NHẤT — điều khiển cách hệ thống bảo vệ.
 #
@@ -133,7 +133,7 @@ protection:
     auto_enable: true                # Tự động bật/tắt dựa trên monitor
 
 # ================================================================
-# 🔍 FINGERPRINT — Nhận dạng trình duyệt/bot
+# FINGERPRINT — Nhận dạng trình duyệt/bot
 # ================================================================
 # Phân tích "dấu vân tay" kết nối TLS và HTTP/2 để phân biệt
 # trình duyệt thật (Chrome, Firefox...) với công cụ tấn công.
@@ -154,7 +154,7 @@ fingerprint:
     strict: false                    # true = nghiêm ngặt (có thể chặn nhầm)
 
 # ================================================================
-# 🕵️ INTELLIGENCE — Lớp tình báo
+# INTELLIGENCE — Lớp tình báo
 # ================================================================
 # Thu thập thông tin về IP để đánh giá mức độ đáng tin cậy.
 
@@ -173,7 +173,7 @@ intelligence:
   # Đăng ký miễn phí: https://www.abuseipdb.com/register
   ip_reputation:
     enabled: false                   # Bật kiểm tra danh tiếng IP
-    abuseipdb_key: ""                # API Key từ AbuseIPDB (bắt buộc nếu enabled=true, hoặc qua ENV MANGO_INTELLIGENCE_IP_REPUTATION_ABUSEIPDB_KEY)
+    abuseipdb_key: "4b91ed6e28c8443105e50680adc349833e65ea07f5c2129eed203b28eea5ff95e8771572a91b5951"                # API Key từ AbuseIPDB (bắt buộc nếu enabled=true, hoặc qua ENV MANGO_INTELLIGENCE_IP_REPUTATION_ABUSEIPDB_KEY)
     cache_ttl: 1h                    # Cache kết quả 1 giờ (giảm số API call)
 
   # ── ASN: Phân loại nhà mạng ──
@@ -184,7 +184,7 @@ intelligence:
     block_datacenter: false          # true = chặn IP từ datacenter (cẩn thận với API client)
 
 # ================================================================
-# 🔬 DETECTION — Phát hiện tấn công
+#  DETECTION — Phát hiện tấn công
 # ================================================================
 # Hệ thống phát hiện bao gồm:
 #   • Baseline: học mẫu traffic bình thường
@@ -213,7 +213,7 @@ detection:
     ttl: 30m                         # Phiên hết hạn sau 30 phút không hoạt động
 
 # ================================================================
-# 🧱 WAF — Tường lửa Ứng dụng Web
+#  WAF — Tường lửa Ứng dụng Web
 # ================================================================
 # Kiểm tra nội dung request để phát hiện tấn công ứng dụng:
 #   • SQL Injection (SQLi)
@@ -235,40 +235,40 @@ waf:
   paranoia_level: 2                  # Mức nghiêm ngặt: 1-4 (bắt đầu với 2)
 
 # ================================================================
-# 📝 LOGGING — Ghi log hệ thống
+# LOGGING — Ghi log hệ thống
 # ================================================================
 # Log giúp theo dõi hoạt động và điều tra sự cố.
 logging:
   level: "info"                      # Mức log: debug | info | warn | error
   format: "json"                     # Định dạng: json (máy đọc) | text (người đọc)
-  file: "/var/log/mango-shield.log"  # Đường dẫn file log (trống = chỉ hiện console)
+  file: ""                           # File log (trống = log ra console/stdout cho Docker)
   max_size_mb: 100                   # Kích thước tối đa 1 file log (MB)
   max_backups: 5                     # Số file log cũ giữ lại
   attack_log: ""                     # File log riêng cho tấn công (trống = gộp chung)
 
 # ================================================================
-# 📊 METRICS — Số liệu giám sát
+# METRICS — Số liệu giám sát
 # ================================================================
 # Xuất metrics dạng Prometheus để giám sát với Grafana.
 metrics:
-  enabled: false                     # Bật endpoint metrics
-  listen: "127.0.0.1:9100"          # Địa chỉ endpoint metrics
+  enabled: true                      # Bật endpoint metrics
+  listen: "0.0.0.0:9100"            # Địa chỉ endpoint metrics
   path: "/metrics"                   # Đường dẫn URL metrics
 
 # ================================================================
-# 📺 DASHBOARD — Bảng điều khiển web
+# DASHBOARD — Bảng điều khiển web
 # ================================================================
 # Giao diện web hiển thị thống kê thời gian thực.
 # Truy cập qua trình duyệt: http://127.0.0.1:9090
 dashboard:
   enabled: true                      # Bật bảng điều khiển
-  listen: "127.0.0.1:9090"          # Địa chỉ — dùng 127.0.0.1 (chỉ local) hoặc 0.0.0.0 (public)
+  listen: "0.0.0.0:9090"            # Địa chỉ — 0.0.0.0 (public dashboard API)
   username: "admin"                  # Tên đăng nhập (đổi trước khi deploy!)
-  password: ""                       # Mật khẩu (ĐỔI MẬT KHẨU MẠNH HOẶC DÙNG ENV MANGO_DASHBOARD_PASSWORD)
+  password: "admin123"                       # Mật khẩu (ĐỔI MẬT KHẨU MẠNH HOẶC DÙNG ENV MANGO_DASHBOARD_PASSWORD)
   jwt_secret: ""                     # Khóa JWT (trống = tự tạo ngẫu nhiên mỗi lần khởi động)
 
 # ================================================================
-# 🔔 ALERTS — Cảnh báo tấn công
+# ALERTS — Cảnh báo tấn công
 # ================================================================
 # Gửi thông báo khi phát hiện tấn công hoặc sự kiện quan trọng.
 # Hỗ trợ: Telegram, Discord, Webhook tùy chỉnh.
@@ -276,9 +276,9 @@ alerts:
 
   # ── Telegram ──
   telegram:
-    enabled: false                  # Bật cảnh báo Telegram
-    token: ""                       # Token Bot (hoặc qua ENV MANGO_ALERTS_TELEGRAM_TOKEN)
-    chat_id: ""                     # Chat ID (hoặc qua ENV MANGO_ALERTS_TELEGRAM_CHAT_ID)
+    enabled: true                  # Bật cảnh báo Telegram
+    token: "8494737835:AAGCiDKjc7FQ2IMlXNLhrGMa_UCSe_ZGiFw"                       # Token Bot (hoặc qua ENV MANGO_ALERTS_TELEGRAM_TOKEN)
+    chat_id: "8794276117"                     # Chat ID (hoặc qua ENV MANGO_ALERTS_TELEGRAM_CHAT_ID)
 
   # ── Discord ──
   # Nhận cảnh báo qua Discord Webhook.
@@ -328,7 +328,7 @@ cdn:
     - "X-No-Cache"
 
 # ================================================================
-# 🕸️ CLUSTER P2P (Mango Mesh)
+# CLUSTER P2P (Mango Mesh)
 # ================================================================
 # Dành cho hệ thống nhiều VPS (Multi-Node Cluster).
 # Các Firewall tự liên lạc với nhau qua Gossip Protocol (UDP/TCP)
