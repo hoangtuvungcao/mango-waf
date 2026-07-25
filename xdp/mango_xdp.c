@@ -27,12 +27,29 @@ int xdp_drop_banned(struct xdp_md *ctx) {
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    // 2. Only process IPv4 packets (IPv6 can be added later)
-    if (eth->h_proto != bpf_htons(ETH_P_IP))
+    // 2. Parse L2 / VLAN encapsulation
+    __u16 h_proto = eth->h_proto;
+    void *l3_hdr = (void *)(eth + 1);
+
+    // Support 802.1Q and 802.1ad VLAN tags
+    if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(0x88A8)) {
+        struct vlan_hdr {
+            __be16 tci;
+            __be16 encap_proto;
+        } *vlan = l3_hdr;
+
+        if ((void *)(vlan + 1) > data_end)
+            return XDP_PASS;
+
+        h_proto = vlan->encap_proto;
+        l3_hdr = (void *)(vlan + 1);
+    }
+
+    if (h_proto != bpf_htons(ETH_P_IP))
         return XDP_PASS;
 
     // 3. Check if packet is large enough to contain IP header
-    struct iphdr *ip = data + sizeof(*eth);
+    struct iphdr *ip = l3_hdr;
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 

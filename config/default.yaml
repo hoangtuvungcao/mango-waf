@@ -172,8 +172,8 @@ intelligence:
   # Tra cứu IP trong database AbuseIPDB để biết IP có từng bị báo cáo.
   # Đăng ký miễn phí: https://www.abuseipdb.com/register
   ip_reputation:
-    enabled: true                    # Bật kiểm tra danh tiếng IP
-    abuseipdb_key: "4b91ed6e28c8443105e50680adc349833e65ea07f5c2129eed203b28eea5ff95e8771572a91b5951"                # API Key từ AbuseIPDB (bắt buộc nếu enabled=true)
+    enabled: false                   # Bật kiểm tra danh tiếng IP
+    abuseipdb_key: ""                # API Key từ AbuseIPDB (bắt buộc nếu enabled=true, hoặc qua ENV MANGO_INTELLIGENCE_IP_REPUTATION_ABUSEIPDB_KEY)
     cache_ttl: 1h                    # Cache kết quả 1 giờ (giảm số API call)
 
   # ── ASN: Phân loại nhà mạng ──
@@ -264,7 +264,7 @@ dashboard:
   enabled: true                      # Bật bảng điều khiển
   listen: "127.0.0.1:9090"          # Địa chỉ — dùng 127.0.0.1 (chỉ local) hoặc 0.0.0.0 (public)
   username: "admin"                  # Tên đăng nhập (đổi trước khi deploy!)
-  password: "admin123"        # Mật khẩu (ĐỔI MẬT KHẨU MẠNH TRƯỚC KHI DEPLOY!)
+  password: ""                       # Mật khẩu (ĐỔI MẬT KHẨU MẠNH HOẶC DÙNG ENV MANGO_DASHBOARD_PASSWORD)
   jwt_secret: ""                     # Khóa JWT (trống = tự tạo ngẫu nhiên mỗi lần khởi động)
 
 # ================================================================
@@ -275,16 +275,10 @@ dashboard:
 alerts:
 
   # ── Telegram ──
-  # Nhận cảnh báo qua Telegram Bot.
-  # Cách tạo bot:
-  #   1. Chat với @BotFather trên Telegram
-  #   2. Gửi /newbot và làm theo hướng dẫn
-  #   3. Nhận Token (dạng: 123456:ABC-DEF...)
-  #   4. Chat với @userinfobot để lấy Chat ID
   telegram:
-    enabled: true                   # Bật cảnh báo Telegram
-    token: "6337073929:AAGsvCXWRJ6Ol-K5V1ZCJ6vmcLll-0UsnE8"                        # Token Bot (từ @BotFather)
-    chat_id: "5805939083"                      # Chat ID (từ @userinfobot hoặc group ID)
+    enabled: false                  # Bật cảnh báo Telegram
+    token: ""                       # Token Bot (hoặc qua ENV MANGO_ALERTS_TELEGRAM_TOKEN)
+    chat_id: ""                     # Chat ID (hoặc qua ENV MANGO_ALERTS_TELEGRAM_CHAT_ID)
 
   # ── Discord ──
   # Nhận cảnh báo qua Discord Webhook.

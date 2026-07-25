@@ -96,6 +96,13 @@ func (tb *TokenBucket) SetRate(newRate float64) {
 	tb.rate = newRate
 }
 
+// LastSeen returns the last access timestamp
+func (tb *TokenBucket) LastSeen() time.Time {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return tb.lastTime
+}
+
 // IPRateLimiter manages per-IP rate limiters
 type IPRateLimiter struct {
 	mu       sync.RWMutex
@@ -123,6 +130,7 @@ func (rl *IPRateLimiter) Allow(ip string) bool {
 
 	if !ok {
 		rl.mu.Lock()
+		// Double-check
 		limiter, ok = rl.limiters[ip]
 		if !ok {
 			limiter = NewTokenBucket(rl.rate, rl.capacity)
@@ -145,10 +153,12 @@ func (rl *IPRateLimiter) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 	for range ticker.C {
+		now := time.Now()
 		rl.mu.Lock()
-		// Clear all — stale entries will recreate on next request
-		if len(rl.limiters) > 10000 {
-			rl.limiters = make(map[string]*TokenBucket)
+		for ip, tb := range rl.limiters {
+			if now.Sub(tb.LastSeen()) > 10*time.Minute {
+				delete(rl.limiters, ip)
+			}
 		}
 		rl.mu.Unlock()
 	}

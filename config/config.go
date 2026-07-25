@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,7 @@ type ProxyConfig struct {
 type ProtectionConfig struct {
 	Mode            string          `yaml:"mode"`
 	WhitelistIPs    []string        `yaml:"whitelist_ips"`
+	TrustedProxies  []string        `yaml:"trusted_proxies"`
 	RateLimit       RateLimitConfig `yaml:"rate_limit"`
 	ConnectionLimit ConnLimitConfig `yaml:"connection_limit"`
 	Challenge       ChallengeConfig `yaml:"challenge"`
@@ -348,7 +350,7 @@ func setDefaults(cfg *Config) {
 		cfg.Protection.ConnectionLimit.MaxTotal = 10000
 	}
 	if cfg.Protection.Challenge.PowDifficulty == 0 {
-		cfg.Protection.Challenge.PowDifficulty = 3000000
+		cfg.Protection.Challenge.PowDifficulty = 3
 	}
 	if cfg.Protection.Challenge.CookieTTL == 0 {
 		cfg.Protection.Challenge.CookieTTL = 30 * time.Minute
@@ -415,11 +417,35 @@ func validate(cfg *Config) error {
 	if cfg.Protection.Emergency.RPSThreshold < 10 {
 		return fmt.Errorf("emergency.rps_threshold must be >= 10")
 	}
+
+	// Validate protection mode enum
+	validModes := map[string]bool{"auto": true, "challenge": true, "captcha": true, "block": true, "monitor": true}
+	if !validModes[strings.ToLower(cfg.Protection.Mode)] {
+		return fmt.Errorf("invalid protection mode '%s': must be auto, challenge, captcha, block, or monitor", cfg.Protection.Mode)
+	}
+
+	// Validate CIDRs in trusted_proxies
+	for _, proxy := range cfg.Protection.TrustedProxies {
+		if !strings.Contains(proxy, "/") {
+			proxy = proxy + "/32"
+		}
+		if _, _, err := net.ParseCIDR(proxy); err != nil {
+			return fmt.Errorf("invalid trusted_proxy CIDR '%s': %w", proxy, err)
+		}
+	}
+
+	// Validate PoW difficulty bounds
+	if cfg.Protection.Challenge.PowDifficulty < 1 || cfg.Protection.Challenge.PowDifficulty > 10 {
+		return fmt.Errorf("pow_difficulty must be between 1 and 10, got %d", cfg.Protection.Challenge.PowDifficulty)
+	}
+
 	return nil
 }
 
 func randomHex(n int) string {
 	b := make([]byte, n)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand read failure: %v", err))
+	}
 	return hex.EncodeToString(b)
 }

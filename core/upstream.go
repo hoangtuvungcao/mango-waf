@@ -141,45 +141,51 @@ func (um *UpstreamManager) healthCheckLoop() {
 
 func (um *UpstreamManager) runHealthChecks(client *http.Client) {
 	um.mutex.RLock()
-	defer um.mutex.RUnlock()
+	pools := make([]*UpstreamPool, 0, len(um.pools))
+	for _, p := range um.pools {
+		pools = append(pools, p)
+	}
+	um.mutex.RUnlock()
 
-	for domain, pool := range um.pools {
+	for _, pool := range pools {
 		pool.Mutex.Lock()
-		for _, backend := range pool.Backends {
-			// Ping backend
+		backends := make([]*UpstreamBackend, len(pool.Backends))
+		copy(backends, pool.Backends)
+		pool.Mutex.Unlock()
+
+		for _, backend := range backends {
 			targetUrl, err := url.Parse(backend.URL)
 			if err != nil {
 				continue
 			}
 
-			// Try a basic GET request to root, we just need a connection
+			// Try GET request outside of mutex lock
 			resp, err := client.Get(targetUrl.Scheme + "://" + targetUrl.Host)
 			isAlive := err == nil
 			if resp != nil {
 				resp.Body.Close()
-				// Re-evaluate alive status based on HTTP code (5xx is usually bad, but for basic check, connect is enough)
 				if resp.StatusCode >= 500 && resp.StatusCode != 503 {
-					// 503 could be maintenance, let's just mark it down if it's 500, 502, 504
 					if resp.StatusCode == 500 || resp.StatusCode == 502 || resp.StatusCode == 504 {
 						isAlive = false
 					}
 				}
 			}
 
+			pool.Mutex.Lock()
 			if isAlive {
 				if !backend.IsAlive {
-					logger.Info("Upstream backend recovered", "domain", domain, "url", backend.URL)
+					logger.Info("Upstream backend recovered", "url", backend.URL)
 				}
 				backend.IsAlive = true
 				backend.Failures = 0
 			} else {
 				backend.Failures++
 				if backend.IsAlive && backend.Failures >= 3 {
-					logger.Warn("Upstream backend is down after 3 failures", "domain", domain, "url", backend.URL)
+					logger.Warn("Upstream backend is down after 3 failures", "url", backend.URL)
 					backend.IsAlive = false
 				}
 			}
+			pool.Mutex.Unlock()
 		}
-		pool.Mutex.Unlock()
 	}
 }

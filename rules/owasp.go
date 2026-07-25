@@ -14,8 +14,8 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 		{
 			ID: "920100", Name: "Invalid HTTP Request Line",
 			Category: "protocol", Severity: "high", Phase: 1, Paranoia: 1,
-			Targets: []string{"METHOD"}, Operator: "rx",
-			Pattern: `^(?!GET|POST|HEAD|PUT|DELETE|PATCH|OPTIONS|CONNECT|TRACE)`,
+			Targets: []string{"METHOD"}, Operator: "!rx",
+			Pattern: `^(?:GET|POST|HEAD|PUT|DELETE|PATCH|OPTIONS|CONNECT|TRACE)$`,
 			Action:  "block", Enabled: true,
 			Tags: []string{"OWASP_CRS", "protocol"},
 		},
@@ -23,7 +23,7 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 			ID: "920170", Name: "GET/HEAD with Body",
 			Category: "protocol", Severity: "medium", Phase: 1, Paranoia: 1,
 			Targets: []string{"HEADERS"}, Operator: "rx",
-			Pattern: `content-length:\s*[1-9]`,
+			Pattern: `^[1-9]\d*$`,
 			Action:  "block", Enabled: true,
 			Tags: []string{"OWASP_CRS", "protocol"},
 		},
@@ -267,7 +267,7 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 
 	for _, rule := range owaspRules {
 		if rule.Paranoia <= paranoiaLevel {
-			if rule.Operator == "rx" && rule.Pattern != "" {
+			if (rule.Operator == "rx" || rule.Operator == "!rx") && rule.Pattern != "" {
 				compiled, err := regexp.Compile("(?i)" + rule.Pattern)
 				if err != nil {
 					logger.Warn("Failed to compile WAF rule", "rule", rule.ID, "error", err)

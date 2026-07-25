@@ -190,7 +190,8 @@ func (m *Manager) verifyTurnstile(w http.ResponseWriter, r *http.Request, ip str
 	}
 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
-	if err != nil || time.Now().Unix()-ts > 300 { // 5 minutes expiry
+	diff := time.Now().Unix() - ts
+	if err != nil || diff < -10 || diff > 300 { // 5 minutes expiry, clock skew tolerance 10s
 		logger.Warn("Turnstile expired or invalid timestamp", "ip", ip)
 		return false
 	}

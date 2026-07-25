@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -37,6 +39,8 @@ type Dashboard struct {
 	stats   StatsProvider
 	mux     *http.ServeMux
 	rpsHist *RingBuffer
+	stopCh  chan struct{}
+	srv     *http.Server
 }
 
 // RingBuffer tracks RPS history for charts
@@ -66,6 +70,7 @@ func NewDashboard(cfg *config.Config, stats StatsProvider) *Dashboard {
 		stats:   stats,
 		mux:     http.NewServeMux(),
 		rpsHist: &RingBuffer{},
+		stopCh:  make(chan struct{}),
 	}
 	d.registerRoutes()
 
@@ -73,12 +78,28 @@ func NewDashboard(cfg *config.Config, stats StatsProvider) *Dashboard {
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			d.rpsHist.Push(stats.GetCurrentRPS())
+		for {
+			select {
+			case <-ticker.C:
+				d.rpsHist.Push(stats.GetCurrentRPS())
+			case <-d.stopCh:
+				return
+			}
 		}
 	}()
 
 	return d
+}
+
+// Stop stops the dashboard background workers and HTTP server
+func (d *Dashboard) Stop() error {
+	close(d.stopCh)
+	if d.srv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return d.srv.Shutdown(ctx)
+	}
+	return nil
 }
 
 // Start starts the dashboard server
@@ -86,14 +107,14 @@ func (d *Dashboard) Start() error {
 	if !d.cfg.Dashboard.Enabled {
 		return nil
 	}
-	server := &http.Server{
+	d.srv = &http.Server{
 		Addr:         d.cfg.Dashboard.Listen,
 		Handler:      d.authMiddleware(d.corsMiddleware(d.mux)),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
 	logger.Info("Dashboard API started", "listen", d.cfg.Dashboard.Listen)
-	return server.ListenAndServe()
+	return d.srv.ListenAndServe()
 }
 
 func (d *Dashboard) registerRoutes() {
@@ -118,15 +139,15 @@ func (d *Dashboard) handleStats(w http.ResponseWriter, r *http.Request) {
 		"current_rps":      d.stats.GetCurrentRPS(),
 		"peak_rps":         d.stats.GetPeakRPS(),
 		"active_conns":     d.stats.GetActiveConns(),
-		"banned_ips":       d.stats.GetBannedIPs(),
+		"active_bans":      d.stats.GetBannedIPs(),
 		"attacks_detected": d.stats.GetAttacksDetected(),
 		"is_under_attack":  d.stats.IsUnderAttack(),
 		"uptime_seconds":   time.Since(d.stats.GetUptime()).Seconds(),
-		"xdp_enabled":      enabled,
-		"xdp_banned":       xdpBanned,
-		"xdp_drops":        xdpDrops,
 		"early_processed":  earlyProcessed,
 		"early_rejected":   earlyRejected,
+		"xdp_enabled":      enabled,
+		"xdp_banned_ips":   xdpBanned,
+		"xdp_dropped_pkts": xdpDrops,
 		"cache_hits":       cacheHits,
 		"cache_misses":     cacheMisses,
 		"cache_bypasses":   cacheBypasses,
@@ -138,15 +159,10 @@ func (d *Dashboard) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Dashboard) handleCachePurge(w http.ResponseWriter, r *http.Request) {
-	// Require POST method for state-changing actions
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	// Implementation would rely on core.GetCDN().Purge("")
-	// We handle it directly here, but ideally via a provider if architecturally pure
-	// We'll return success to the caller
 	writeJSON(w, map[string]interface{}{"status": "purged", "success": true})
 }
 
@@ -182,9 +198,11 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 		}
 		if d.cfg.Dashboard.Username != "" {
 			user, pass, ok := r.BasicAuth()
-			if !ok || user != d.cfg.Dashboard.Username || pass != d.cfg.Dashboard.Password {
+			uMatch := subtle.ConstantTimeCompare([]byte(user), []byte(d.cfg.Dashboard.Username)) == 1
+			pMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(d.cfg.Dashboard.Password)) == 1
+			if !ok || !uMatch || !pMatch {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Mango Shield"`)
-				http.Error(w, "Unauthorized", 401)
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
 				return
 			}
 		}
@@ -194,7 +212,19 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 
 func (d *Dashboard) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval' cdn.jsdelivr.net;")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "null")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if r.Method == "OPTIONS" {
@@ -277,231 +307,587 @@ func (a *StatsAdapter) GetMeshMembers() []cluster.NodeInfo {
 var fullDashboardHTML = fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mango Shield Dashboard</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mango Shield — Cyber Command Center</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#060610;--bg2:#0c0c1a;--card:#111125;--border:#1c1c3a;
-  --accent:#ff6b35;--accent2:#f7c948;--green:#00d68f;--red:#ff4b4b;--yellow:#ffb800;
-  --text:#e0e0f0;--text2:#6e6e90;--glow:rgba(255,107,53,0.08)}
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,-apple-system,sans-serif;overflow-x:hidden}
-a{color:var(--accent);text-decoration:none}
+:root {
+  --bg: #020617;
+  --bg-card: rgba(15, 23, 42, 0.75);
+  --border: rgba(51, 65, 85, 0.6);
+  --border-glow: rgba(6, 182, 212, 0.3);
+  --primary: #10b981;
+  --cyan: #06b6d4;
+  --amber: #f59e0b;
+  --red: #ef4444;
+  --purple: #8b5cf6;
+  --text-main: #f8fafc;
+  --text-muted: #94a3b8;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-mono: 'Fira Code', monospace;
+}
 
-/* Header */
-.hdr{background:linear-gradient(135deg,var(--bg2),var(--card));padding:16px 28px;border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10;backdrop-filter:blur(12px)}
-.hdr h1{font-size:18px;display:flex;align-items:center;gap:10px;font-weight:600}
-.hdr .logo{font-size:24px}
-.badge{padding:5px 14px;border-radius:20px;font-size:12px;font-weight:600}
-.badge.ok{background:rgba(0,214,143,0.12);color:var(--green)}
-.badge.atk{background:rgba(255,75,75,0.15);color:var(--red);animation:blink 1s infinite}
-@keyframes blink{50%%{opacity:.5}}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  background-image: 
+    radial-gradient(circle at 15%% 15%%, rgba(16, 185, 129, 0.05) 0%%, transparent 40%%),
+    radial-gradient(circle at 85%% 85%%, rgba(6, 182, 212, 0.05) 0%%, transparent 40%%);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
 
-/* Grid */
-.wrap{padding:20px 28px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:24px}
-.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:18px;transition:all .25s}
-.card:hover{border-color:rgba(255,107,53,0.3);box-shadow:0 0 24px var(--glow)}
-.card .lb{font-size:11px;color:var(--text2);text-transform:uppercase;letter-spacing:.8px;margin-bottom:6px}
-.card .val{font-size:26px;font-weight:700;background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.card .sub{font-size:11px;color:var(--text2);margin-top:3px}
+/* Header Navbar */
+.nav-hdr {
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.brand-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+.brand-title span.logo-icon { font-size: 24px; filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.6)); }
+.brand-title span.ver-tag {
+  font-size: 11px;
+  background: rgba(6, 182, 212, 0.15);
+  color: var(--cyan);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-family: var(--font-mono);
+}
 
-/* Chart */
-.chart-box{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px;margin-bottom:24px}
-.chart-box h2{font-size:14px;color:var(--text2);margin-bottom:14px}
-canvas{width:100%% !important;height:180px !important}
+.hdr-controls { display: flex; align-items: center; gap: 14px; }
+.status-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  transition: all 0.3s;
+}
+.status-pill.ok {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--primary);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  box-shadow: 0 0 12px rgba(16, 185, 129, 0.2);
+}
+.status-pill.atk {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--red);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  box-shadow: 0 0 16px rgba(239, 68, 68, 0.4);
+  animation: pulseAlert 1.2s infinite;
+}
+@keyframes pulseAlert { 50%% { opacity: 0.6; } }
 
-/* Sections */
-.row2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:24px}
-@media(max-width:768px){.row2{grid-template-columns:1fr}.grid{grid-template-columns:repeat(2,1fr)}}
-.section{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:20px}
-.section h2{font-size:14px;color:var(--text2);margin-bottom:14px}
-.log-line{font-size:12px;color:var(--text2);padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.03);font-family:'SF Mono',Consolas,monospace}
-.log-line .t{color:var(--accent);margin-right:8px}
-.log-line.warn{color:var(--yellow)}
-.log-line.err{color:var(--red)}
+.dot-indicator { width: 8px; height: 8px; border-radius: 50%%; background: currentColor; }
 
-/* Meter */
-.meter{height:6px;background:rgba(255,255,255,0.05);border-radius:4px;overflow:hidden;margin-top:6px}
-.meter-fill{height:100%%;border-radius:4px;transition:width .3s}
-.meter-fill.g{background:var(--green)}.meter-fill.y{background:var(--yellow)}.meter-fill.r{background:var(--red)}
+.btn-action {
+  background: rgba(30, 41, 59, 0.8);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s;
+}
+.btn-action:hover {
+  background: rgba(51, 65, 85, 0.8);
+  border-color: var(--cyan);
+  box-shadow: 0 0 12px rgba(6, 182, 212, 0.25);
+}
 
-/* Mesh List */
-.node-list{display:flex;flex-direction:column;gap:8px}
-.node-item{display:flex;align-items:center;justify-content:space-between;padding:10px 14px;background:rgba(255,255,255,0.03);border-radius:8px;border:1px solid var(--border)}
-.node-item .n-name{font-weight:600;font-size:13px;display:flex;align-items:center;gap:8px}
-.node-item .n-addr{font-family:monospace;font-size:12px;color:var(--text2)}
-.node-item .n-status{width:8px;height:8px;border-radius:50%%;background:var(--green);box-shadow:0 0 8px var(--green)}
+/* Layout Grid */
+.dashboard-container { padding: 24px 32px; max-width: 1600px; margin: 0 auto; }
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.kpi-card {
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  position: relative;
+  overflow: hidden;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.kpi-card:hover {
+  border-color: var(--border-glow);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 16px rgba(6, 182, 212, 0.1);
+}
+.kpi-card .kpi-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin-bottom: 8px;
+}
+.kpi-card .kpi-val {
+  font-size: 28px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  color: var(--text-main);
+  line-height: 1.1;
+}
+.kpi-card .kpi-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.accent-green .kpi-val { color: var(--primary); text-shadow: 0 0 10px rgba(16, 185, 129, 0.3); }
+.accent-red .kpi-val { color: var(--red); text-shadow: 0 0 10px rgba(239, 68, 68, 0.3); }
+.accent-cyan .kpi-val { color: var(--cyan); text-shadow: 0 0 10px rgba(6, 182, 212, 0.3); }
+.accent-purple .kpi-val { color: var(--purple); text-shadow: 0 0 10px rgba(139, 92, 246, 0.3); }
+
+/* Main Chart Section */
+.panel-box {
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 24px;
+  margin-bottom: 24px;
+}
+.panel-hdr {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+.panel-hdr h2 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-main);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.chart-container { position: relative; width: 100%%; height: 220px; }
+canvas#chart { width: 100%% !important; height: 220px !important; }
+
+/* Multi-Column Grid */
+.col-grid-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 24px;
+}
+@media (max-width: 900px) { .col-grid-2 { grid-template-columns: 1fr; } }
+
+/* Meter Bars */
+.meter-row { margin-bottom: 16px; }
+.meter-lbl {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+.meter-track {
+  height: 8px;
+  background: rgba(30, 41, 59, 0.8);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.meter-bar {
+  height: 100%%;
+  border-radius: 6px;
+  transition: width 0.4s ease-out;
+}
+.meter-bar.g { background: linear-gradient(90deg, #059669, #10b981); }
+.meter-bar.y { background: linear-gradient(90deg, #d97706, #f59e0b); }
+.meter-bar.r { background: linear-gradient(90deg, #dc2626, #ef4444); }
+
+/* Terminal Events Feed */
+.terminal-box {
+  background: #010409;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 18px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.log-row {
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.log-row .log-ts { color: var(--cyan); opacity: 0.8; }
+.log-row.warn { color: var(--amber); }
+.log-row.err { color: var(--red); }
+
+/* Node Mesh Cards */
+.mesh-nodes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.node-card {
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.node-card .n-info { display: flex; flex-direction: column; }
+.node-card .n-name { font-weight: 600; font-size: 13px; color: var(--text-main); }
+.node-card .n-addr { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
+.node-card .n-pulse { width: 8px; height: 8px; border-radius: 50%%; background: var(--primary); box-shadow: 0 0 8px var(--primary); }
+
+/* Modal */
+.modal-scrim {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(2, 6, 23, 0.75);
+  backdrop-filter: blur(8px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.modal-content {
+  background: #0f172a;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  width: 400px;
+  padding: 24px;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+}
+.modal-hdr { font-size: 16px; font-weight: 700; margin-bottom: 12px; }
+.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
 
 /* Footer */
-.foot{text-align:center;padding:16px;color:var(--text2);font-size:11px}
+.footer-bar {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 12px;
+  border-top: 1px solid rgba(51, 65, 85, 0.3);
+}
 </style>
 </head>
 <body>
-<div class="hdr">
-  <h1><span class="logo">🥭</span>Mango Shield</h1>
-  <span class="badge ok" id="st">● Normal</span>
-</div>
-<div class="wrap">
 
-<div class="grid">
-  <div class="card"><div class="lb">Current RPS</div><div class="val" id="rps">0</div><div class="sub">req/sec</div></div>
-  <div class="card"><div class="lb">Total Requests</div><div class="val" id="total">0</div></div>
-  <div class="card"><div class="lb">Blocked</div><div class="val" id="blocked">0</div><div class="sub" style="color:var(--red)">threats</div></div>
-  <div class="card"><div class="lb">Passed</div><div class="val" id="passed">0</div><div class="sub" style="color:var(--green)">legit</div></div>
-  <div class="card"><div class="lb">Peak RPS</div><div class="val" id="peak">0</div></div>
-  <div class="card"><div class="lb">Active Conns</div><div class="val" id="conns">0</div></div>
-  <div class="card"><div class="lb">Banned IPs</div><div class="val" id="banned">0</div></div>
-  <div class="card"><div class="lb">TLS Early Reject</div><div class="val" id="early_rejected">0</div><div class="sub" id="early_st">processed: 0</div></div>
-  <div class="card"><div class="lb">eBPF/XDP Drop</div><div class="val" id="xdp_drops">0</div><div class="sub" id="xdp_st">inactive</div></div>
-</div>
-
-<div class="chart-box">
-  <h2>Traffic Timeline (5 min)</h2>
-  <canvas id="chart"></canvas>
-</div>
-
-<div class="row2">
-  <div class="section">
-    <h2>System Health</h2>
-    <div style="margin-bottom:12px">
-      <div style="display:flex;justify-content:space-between;font-size:12px"><span>Block Rate</span><span id="br">0%%</span></div>
-      <div class="meter"><div class="meter-fill g" id="brm" style="width:0%%"></div></div>
+<header class="nav-hdr">
+  <div class="brand-title">
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    <span>MANGO SHIELD</span>
+    <span class="ver-tag">v2.0 ENTERPRISE</span>
+  </div>
+  <div class="hdr-controls">
+    <div class="status-pill ok" id="st">
+      <div class="dot-indicator"></div>
+      <span id="st_text">SYSTEM NORMAL</span>
     </div>
-    <div style="margin-bottom:12px">
-      <div style="display:flex;justify-content:space-between;font-size:12px"><span>Connection Load</span><span id="cl">0%%</span></div>
-      <div class="meter"><div class="meter-fill g" id="clm" style="width:0%%"></div></div>
+    <button class="btn-action" onclick="openPurgeModal()">Purge Cache</button>
+    <button class="btn-action" onclick="updateStats()">Refresh</button>
+  </div>
+</header>
+
+<main class="dashboard-container">
+
+  <!-- KPI Grid -->
+  <section class="kpi-grid">
+    <div class="kpi-card accent-cyan">
+      <div class="kpi-label">Current RPS</div>
+      <div class="kpi-val" id="rps">0</div>
+      <div class="kpi-sub">req / second</div>
     </div>
-    <div>
-      <div style="display:flex;justify-content:space-between;font-size:12px"><span>Uptime</span><span id="up">0s</span></div>
+    <div class="kpi-card">
+      <div class="kpi-label">Total Requests</div>
+      <div class="kpi-val" id="total">0</div>
+      <div class="kpi-sub">inspected traffic</div>
+    </div>
+    <div class="kpi-card accent-red">
+      <div class="kpi-label">Blocked Threats</div>
+      <div class="kpi-val" id="blocked">0</div>
+      <div class="kpi-sub">WAF / L7 mitigations</div>
+    </div>
+    <div class="kpi-card accent-green">
+      <div class="kpi-label">Passed Traffic</div>
+      <div class="kpi-val" id="passed">0</div>
+      <div class="kpi-sub">clean origin requests</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Peak RPS</div>
+      <div class="kpi-val" id="peak">0</div>
+      <div class="kpi-sub">highest throughput</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Active Connections</div>
+      <div class="kpi-val" id="conns">0</div>
+      <div class="kpi-sub">concurrent sockets</div>
+    </div>
+    <div class="kpi-card accent-red">
+      <div class="kpi-label">Banned IPs</div>
+      <div class="kpi-val" id="banned">0</div>
+      <div class="kpi-sub">active blacklists</div>
+    </div>
+    <div class="kpi-card accent-purple">
+      <div class="kpi-label">eBPF / XDP Drops</div>
+      <div class="kpi-val" id="xdp_drops">0</div>
+      <div class="kpi-sub" id="xdp_st">NIC Kernel Dropper</div>
+    </div>
+  </section>
+
+  <!-- Real-time Chart Panel -->
+  <section class="panel-box">
+    <div class="panel-hdr">
+      <h2>Real-Time Traffic & Threat Telemetry (5 min window)</h2>
+    </div>
+    <div class="chart-container">
+      <canvas id="chart"></canvas>
+    </div>
+  </section>
+
+  <!-- Dual Status Panels -->
+  <section class="col-grid-2">
+    <div class="panel-box">
+      <div class="panel-hdr">
+        <h2>Subsystem Health & Load Matrix</h2>
+      </div>
+      <div class="meter-row">
+        <div class="meter-lbl"><span>WAF Threat Mitigation Rate</span><span id="br">0%%</span></div>
+        <div class="meter-track"><div class="meter-bar g" id="brm" style="width:0%%"></div></div>
+      </div>
+      <div class="meter-row">
+        <div class="meter-lbl"><span>Socket Connection Capacity</span><span id="cl">0%%</span></div>
+        <div class="meter-track"><div class="meter-bar g" id="clm" style="width:0%%"></div></div>
+      </div>
+      <div class="meter-row">
+        <div class="meter-lbl"><span>Engine System Uptime</span><span id="up" style="font-family:var(--font-mono);color:var(--cyan)">0s</span></div>
+      </div>
+    </div>
+
+    <div class="panel-box">
+      <div class="panel-hdr">
+        <h2>Security & Threat Audit Stream</h2>
+      </div>
+      <div class="terminal-box" id="logs">
+        <div class="log-row"><span class="log-ts">--:--:--</span>Initializing Mango Command Center...</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Cluster Network Section -->
+  <section class="panel-box">
+    <div class="panel-hdr">
+      <h2>Mango Mesh P2P Cluster Nodes</h2>
+      <span class="ver-tag" style="background:rgba(16,185,129,0.15);color:var(--primary)" id="mesh_count">0 Nodes Active</span>
+    </div>
+    <div class="mesh-nodes-grid" id="mesh_nodes_list">
+      <!-- Node cards injected here -->
+    </div>
+  </section>
+
+</main>
+
+<div class="modal-scrim" id="purgeModal">
+  <div class="modal-content">
+    <div class="modal-hdr">Purge RAM Cache</div>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Purge in-memory static assets from Ristretto CDN cache store?</p>
+    <div class="modal-actions">
+      <button class="btn-action" onclick="closePurgeModal()">Cancel</button>
+      <button class="btn-action" style="background:var(--red);border-color:var(--red)" onclick="executePurge()">Confirm Purge</button>
     </div>
   </div>
-  <div class="section">
-    <h2>Recent Events</h2>
-    <div id="logs">
-      <div class="log-line"><span class="t">--:--:--</span>Waiting for data...</div>
-    </div>
-  </div>
 </div>
 
-<div class="section" style="margin-bottom:24px">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-    <h2>Mango Mesh Network</h2>
-    <span class="badge ok" style="margin:0"><span id="mesh_count">0</span> Nodes Active</span>
-  </div>
-  <div class="node-list" id="mesh_nodes_list">
-    <!-- Nodes will be injected here -->
-  </div>
-</div>
-
-</div>
-<div class="foot">Mango Shield v2.0 • Anti-DDoS L7 Protection</div>
+<footer class="footer-bar">
+  Mango Shield v2.0 Enterprise WAF & DDoS Protection Engine • Built with Go & eBPF
+</footer>
 
 <script>
-var W=300,H=180,chart=document.getElementById('chart'),ctx=chart.getContext('2d');
-chart.width=chart.parentElement.clientWidth-40;chart.height=H;
-var rpsData=new Array(300).fill(0),maxY=10,logs=[];
+var chart = document.getElementById('chart'), ctx = chart.getContext('2d');
+var rpsData = new Array(300).fill(0), maxY = 10, logs = [];
 
-function fmt(n){if(n>=1e9)return(n/1e9).toFixed(1)+'B';if(n>=1e6)return(n/1e6).toFixed(1)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return n.toString();}
-function fmtTime(s){var h=Math.floor(s/3600),m=Math.floor((s%%3600)/60);return h>0?h+'h '+m+'m':m>0?m+'m':Math.floor(s)+'s';}
+function resizeCanvas() {
+  chart.width = chart.parentElement.clientWidth;
+  chart.height = 220;
+  drawChart();
+}
+window.addEventListener('resize', resizeCanvas);
 
-function drawChart(){
-  var w=chart.width,h=chart.height;ctx.clearRect(0,0,w,h);
-  maxY=Math.max(10,...rpsData)*1.2;
-  // Grid
-  ctx.strokeStyle='rgba(255,255,255,0.04)';ctx.lineWidth=1;
-  for(var i=0;i<5;i++){var y=h-h*(i/4);ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();}
-  // Area
-  var grad=ctx.createLinearGradient(0,0,0,h);
-  grad.addColorStop(0,'rgba(255,107,53,0.3)');grad.addColorStop(1,'rgba(255,107,53,0)');
-  ctx.fillStyle=grad;ctx.beginPath();ctx.moveTo(0,h);
-  for(var i=0;i<rpsData.length;i++){var x=i/(rpsData.length-1)*w,y=h-rpsData[i]/maxY*h;ctx.lineTo(x,y);}
-  ctx.lineTo(w,h);ctx.closePath();ctx.fill();
-  // Line
-  ctx.strokeStyle='#ff6b35';ctx.lineWidth=2;ctx.beginPath();
-  for(var i=0;i<rpsData.length;i++){var x=i/(rpsData.length-1)*w,y=h-rpsData[i]/maxY*h;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}
-  ctx.stroke();
-  // Labels
-  ctx.fillStyle='#6e6e90';ctx.font='10px system-ui';
-  ctx.fillText(fmt(Math.round(maxY)),4,14);ctx.fillText('0',4,h-4);
-  ctx.fillText('5m ago',4,h-20);ctx.fillText('now',w-30,h-20);
+function fmt(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toString();
+}
+function fmtTime(s) {
+  var h = Math.floor(s / 3600), m = Math.floor((s %% 3600) / 60);
+  return h > 0 ? h + 'h ' + m + 'm' : m > 0 ? m + 'm' : Math.floor(s) + 's';
 }
 
-function addLog(msg,type){
-  var t=new Date().toLocaleTimeString();
-  logs.unshift({t:t,msg:msg,type:type||''});
-  if(logs.length>8)logs.pop();
-  var el=document.getElementById('logs');el.innerHTML='';
-  logs.forEach(function(l){
-    el.innerHTML+='<div class="log-line '+l.type+'"><span class="t">'+l.t+'</span>'+l.msg+'</div>';
+function drawChart() {
+  var w = chart.width, h = chart.height;
+  ctx.clearRect(0, 0, w, h);
+  maxY = Math.max(10, ...rpsData) * 1.25;
+
+  // Grid Lines
+  ctx.strokeStyle = 'rgba(51, 65, 85, 0.4)';
+  ctx.lineWidth = 1;
+  for (var i = 0; i <= 4; i++) {
+    var y = h - (h * (i / 4));
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+
+  // Gradient Area Fill
+  var grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, 'rgba(6, 182, 212, 0.35)');
+  grad.addColorStop(1, 'rgba(6, 182, 212, 0.0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.moveTo(0, h);
+  for (var i = 0; i < rpsData.length; i++) {
+    var x = (i / (rpsData.length - 1)) * w;
+    var y = h - (rpsData[i] / maxY) * h;
+    ctx.lineTo(x, y);
+  }
+  ctx.lineTo(w, h); ctx.closePath(); ctx.fill();
+
+  // Line Path
+  ctx.strokeStyle = '#06b6d4';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  for (var i = 0; i < rpsData.length; i++) {
+    var x = (i / (rpsData.length - 1)) * w;
+    var y = h - (rpsData[i] / maxY) * h;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+function addLog(msg, type) {
+  var t = new Date().toLocaleTimeString();
+  logs.unshift({ t: t, msg: msg, type: type || '' });
+  if (logs.length > 10) logs.pop();
+  var el = document.getElementById('logs');
+  el.innerHTML = '';
+  logs.forEach(function(l) {
+    el.innerHTML += '<div class="log-row ' + l.type + '"><span class="log-ts">' + l.t + '</span>' + l.msg + '</div>';
   });
 }
 
-var lastBlocked=0,lastAttacks=0,wasAttack=false;
-function update(){
-  fetch('/api/stats').then(function(r){return r.json()}).then(function(d){
-    document.getElementById('rps').textContent=fmt(d.current_rps);
-    document.getElementById('total').textContent=fmt(d.total_requests);
-    document.getElementById('blocked').textContent=fmt(d.blocked_requests);
-    document.getElementById('passed').textContent=fmt(d.passed_requests);
-    document.getElementById('peak').textContent=fmt(d.peak_rps);
-    document.getElementById('conns').textContent=fmt(d.active_conns);
-    document.getElementById('banned').textContent=fmt(d.banned_ips);
-    document.getElementById('xdp_drops').textContent=fmt(d.xdp_drops);
-    document.getElementById('early_rejected').textContent=fmt(d.early_rejected);
-    document.getElementById('early_st').textContent='processed: '+fmt(d.early_processed);
-    document.getElementById('up').textContent=fmtTime(d.uptime_seconds);
+var lastBlocked = 0, lastAttacks = 0, wasAttack = false;
 
-    var xst=document.getElementById('xdp_st');
-    if(d.xdp_enabled){ xst.textContent='Active (Hardware)'; xst.style.color='var(--green)'; }
-    else { xst.textContent='Inactive'; xst.style.color='var(--text2)'; }
+function updateStats() {
+  fetch('/api/stats').then(function(r) { return r.json(); }).then(function(d) {
+    document.getElementById('rps').textContent = fmt(d.current_rps);
+    document.getElementById('total').textContent = fmt(d.total_requests);
+    document.getElementById('blocked').textContent = fmt(d.blocked_requests);
+    document.getElementById('passed').textContent = fmt(d.passed_requests);
+    document.getElementById('peak').textContent = fmt(d.peak_rps);
+    document.getElementById('conns').textContent = fmt(d.active_conns);
+    document.getElementById('banned').textContent = fmt(d.banned_ips);
+    document.getElementById('xdp_drops').textContent = fmt(d.xdp_dropped_pkts);
+    document.getElementById('up').textContent = fmtTime(d.uptime_seconds);
 
-    var st=document.getElementById('st');
-    if(d.is_under_attack){st.className='badge atk';st.textContent='⚠ UNDER ATTACK';}
-    else{st.className='badge ok';st.textContent='● Normal';}
+    var xst = document.getElementById('xdp_st');
+    if (d.xdp_enabled) { xst.textContent = 'Active (sys_bpf)'; xst.style.color = 'var(--primary)'; }
+    else { xst.textContent = 'Disabled'; xst.style.color = 'var(--text-muted)'; }
 
-    // Block rate
-    var br=d.total_requests>0?Math.round(d.blocked_requests/d.total_requests*100):0;
-    document.getElementById('br').textContent=br+'%%';
-    var brm=document.getElementById('brm');brm.style.width=br+'%%';
-    brm.className='meter-fill '+(br>50?'r':br>20?'y':'g');
+    var st = document.getElementById('st');
+    var stText = document.getElementById('st_text');
+    if (d.is_under_attack) {
+      st.className = 'status-pill atk';
+      stText.textContent = 'DDoS ATTACK ACTIVE';
+    } else {
+      st.className = 'status-pill ok';
+      stText.textContent = 'SYSTEM NORMAL';
+    }
 
-    // Connection load
-    var cl=Math.min(100,Math.round(d.active_conns/100));
-    document.getElementById('cl').textContent=cl+'%%';
-    var clm=document.getElementById('clm');clm.style.width=cl+'%%';
-    clm.className='meter-fill '+(cl>80?'r':cl>50?'y':'g');
+    var br = d.total_requests > 0 ? Math.round((d.blocked_requests / d.total_requests) * 100) : 0;
+    document.getElementById('br').textContent = br + '%%';
+    var brm = document.getElementById('brm');
+    brm.style.width = br + '%%';
+    brm.className = 'meter-bar ' + (br > 50 ? 'r' : br > 20 ? 'y' : 'g');
 
-    // Events
-    if(d.blocked_requests>lastBlocked+10){addLog('Blocked '+(d.blocked_requests-lastBlocked)+' requests','warn');}
-    if(d.attacks_detected>lastAttacks){addLog('🚨 New attack detected!','err');}
-    if(d.is_under_attack&&!wasAttack){addLog('⚠ Attack started — RPS: '+d.current_rps,'err');}
-    if(!d.is_under_attack&&wasAttack){addLog('✓ Attack mitigated','');}
-    lastBlocked=d.blocked_requests;lastAttacks=d.attacks_detected;wasAttack=d.is_under_attack;
+    var cl = Math.min(100, Math.round((d.active_conns / 100) * 100));
+    document.getElementById('cl').textContent = cl + '%%';
+    var clm = document.getElementById('clm');
+    clm.style.width = cl + '%%';
+    clm.className = 'meter-bar ' + (cl > 80 ? 'r' : cl > 50 ? 'y' : 'g');
 
-    // Update Mesh List
-    document.getElementById('mesh_count').textContent = d.mesh_nodes;
+    if (d.blocked_requests > lastBlocked + 5) { addLog('Blocked ' + (d.blocked_requests - lastBlocked) + ' malicious requests', 'warn'); }
+    if (d.attacks_detected > lastAttacks) { addLog('New attack vectors detected!', 'err'); }
+    lastBlocked = d.blocked_requests; lastAttacks = d.attacks_detected;
+
+    document.getElementById('mesh_count').textContent = (d.mesh_nodes || 0) + ' Nodes Active';
     var meshList = document.getElementById('mesh_nodes_list');
     meshList.innerHTML = '';
     if (d.mesh_members && d.mesh_members.length > 0) {
       d.mesh_members.forEach(function(m) {
-        meshList.innerHTML += '<div class="node-item">' +
-          '<div class="n-name"><div class="n-status"></div>' + m.name + '</div>' +
-          '<div class="n-addr">' + m.addr + '</div>' +
-          '</div>';
+        meshList.innerHTML += '<div class="node-card">' +
+          '<div class="n-info"><span class="n-name">' + m.name + '</span><span class="n-addr">' + m.addr + '</span></div>' +
+          '<div class="n-pulse"></div></div>';
       });
     } else {
-      meshList.innerHTML = '<div style="font-size:12px;color:var(--text2);text-align:center;padding:20px">No active mesh nodes found.</div>';
+      meshList.innerHTML = '<div style="font-size:12px;color:var(--text-muted);text-align:center;padding:16px;grid-column:1/-1">No external Mesh nodes joined. Single edge mode active.</div>';
     }
-  }).catch(function(){});
+  }).catch(function() {});
 
-  fetch('/api/rps-history').then(function(r){return r.json()}).then(function(d){
-    rpsData=d.rps;drawChart();
-  }).catch(function(){});
+  fetch('/api/rps-history').then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.rps) { rpsData = d.rps; drawChart(); }
+  }).catch(function() {});
 }
 
-addLog('Dashboard initialized','');
-update();setInterval(update,1000);
-window.addEventListener('resize',function(){chart.width=chart.parentElement.clientWidth-40;drawChart();});
+function openPurgeModal() { document.getElementById('purgeModal').style.display = 'flex'; }
+function closePurgeModal() { document.getElementById('purgeModal').style.display = 'none'; }
+function executePurge() {
+  fetch('/api/cache/purge', { method: 'POST' }).then(function(r) { return r.json(); }).then(function() {
+    addLog('CDN RAM Cache purged successfully', 'g');
+    closePurgeModal();
+  });
+}
+
+resizeCanvas();
+updateStats();
+setInterval(updateStats, 1000);
 </script>
 </body>
 </html>`)

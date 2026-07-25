@@ -244,6 +244,11 @@ func (e *Engine) matchOperator(rule *Rule, value string) bool {
 			return rule.Compiled.MatchString(value)
 		}
 		return false
+	case "!rx":
+		if rule.Compiled != nil {
+			return !rule.Compiled.MatchString(value)
+		}
+		return false
 	case "contains":
 		return strings.Contains(strings.ToLower(value), strings.ToLower(rule.Pattern))
 	case "eq":

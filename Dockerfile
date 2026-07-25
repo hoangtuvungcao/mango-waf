@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates tzdata
 
@@ -8,20 +8,27 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o mango-shield .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o mango-shield ./cmd/cli
 
-# Runtime stage
-FROM alpine:3.19
+# Production Runtime stage
+FROM alpine:3.20
 
 RUN apk add --no-cache ca-certificates tzdata iptables
+
+# Create non-root system user and group
+RUN addgroup -g 10001 -S appgroup && \
+    adduser -u 10001 -S appuser -G appgroup
 
 WORKDIR /app
 
 COPY --from=builder /app/mango-shield .
 COPY --from=builder /app/config/default.yaml ./config/default.yaml
 
-# Create directories
-RUN mkdir -p /app/logs /app/certs /app/data
+# Set ownership and permissions
+RUN mkdir -p /app/logs /app/certs /app/data && \
+    chown -R appuser:appgroup /app
+
+USER 10001:10001
 
 EXPOSE 443 80 9090
 

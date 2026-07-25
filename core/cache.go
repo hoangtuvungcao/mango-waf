@@ -246,9 +246,38 @@ func (cm *CDNManager) RecordBypass() {
 
 // Purge removes an item from cache or clears all if key is empty
 func (cm *CDNManager) Purge(key string) {
+	if cm == nil || cm.cache == nil {
+		return
+	}
 	if key == "" {
 		cm.cache.Clear()
 	} else {
 		cm.cache.Del(key)
 	}
+}
+
+// ServeFromCache attempts to serve a cached response to the client
+func (cm *CDNManager) ServeFromCache(w http.ResponseWriter, r *http.Request) bool {
+	if cm == nil || cm.ShouldBypass(r) {
+		if cm != nil {
+			cm.RecordBypass()
+		}
+		return false
+	}
+
+	key := cm.GenerateCacheKey(r)
+	cached, found := cm.Get(key)
+	if !found || cached == nil {
+		return false
+	}
+
+	for k, vals := range cached.Headers {
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+	w.Header().Set("X-Mango-Cache", "HIT")
+	w.WriteHeader(cached.StatusCode)
+	w.Write(cached.Body)
+	return true
 }

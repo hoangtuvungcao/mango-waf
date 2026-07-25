@@ -22,27 +22,28 @@ import (
 
 // Shield is the main Mango Shield server
 type Shield struct {
-	cfg         *config.Config
-	pipeline    *Pipeline
-	stats       *Stats
-	httpServer  *http.Server
-	listener    net.Listener
-	fpStore     *fingerprint.FingerprintStore
-	challMgr    *challenge.Manager
-	intel       *intelligence.Intel
-	detEngine   *detection.Engine
-	behavior    *detection.BehaviorAnalyzer
-	botClass    *detection.BotClassifier
-	attackDet   *detection.AttackDetector
-	adaptive    *detection.AdaptiveLearner
-	wafEngine   *rules.Engine
-	rateLimiter *perf.IPRateLimiter
-	degrader    *perf.GracefulDegrader
-	validator   *perf.RequestValidator
-	upstreams   *UpstreamManager
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
+	cfg            *config.Config
+	pipeline       *Pipeline
+	stats          *Stats
+	httpServer     *http.Server
+	redirectServer *http.Server
+	listener       net.Listener
+	fpStore        *fingerprint.FingerprintStore
+	challMgr       *challenge.Manager
+	intel          *intelligence.Intel
+	detEngine      *detection.Engine
+	behavior       *detection.BehaviorAnalyzer
+	botClass       *detection.BotClassifier
+	attackDet      *detection.AttackDetector
+	adaptive       *detection.AdaptiveLearner
+	wafEngine      *rules.Engine
+	rateLimiter    *perf.IPRateLimiter
+	degrader       *perf.GracefulDegrader
+	validator      *perf.RequestValidator
+	upstreams      *UpstreamManager
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
 }
 
 // Stats holds real-time statistics
@@ -299,17 +300,29 @@ func (s *Shield) Stop() {
 	s.cancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	s.httpServer.Shutdown(ctx)
+	if s.httpServer != nil {
+		s.httpServer.Shutdown(ctx)
+	}
+	if s.redirectServer != nil {
+		s.redirectServer.Shutdown(ctx)
+	}
 	s.wg.Wait()
 	logger.Info("Mango Shield stopped")
 }
 
 // handleRequest is the main HTTP handler
 func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if err := recover(); err != nil {
+			logger.Error("Panic recovered in HTTP request handler", "error", err, "uri", r.RequestURI)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		}
+	}()
+
 	atomic.AddInt64(&s.stats.TotalRequests, 1)
 
 	// Extract client IP
-	ip := extractIP(r)
+	ip := s.extractIP(r)
 
 	// Handle Challenge Form Verification BEFORE pipeline processing
 	if r.Method == "POST" && r.FormValue("challenge_type") != "" {
@@ -328,27 +341,56 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 			logger.Debug("Fingerprint",
 				"ip", ip,
 				"ja3", connFP.JA3.Hash,
-				"trust", connFP.Composite.Total,
+				"score", connFP.Composite.Total,
 				"verdict", connFP.Composite.Verdict,
 			)
 		}
 	}
 
-	// Run through protection pipeline
+	// Run full 10-layer protection pipeline
 	action := s.pipeline.ProcessWithFingerprint(r, ip, connFP)
 
+	// Execute action
 	switch action.Type {
 	case ActionAllow:
 		atomic.AddInt64(&s.stats.PassedRequests, 1)
-		s.proxyRequest(w, r)
 
-	case ActionChallenge:
-		atomic.AddInt64(&s.stats.ChallengedReqs, 1)
-		s.challMgr.ServeChallenge(w, r, action.Stage, action.Difficulty)
+		// Check CDN Cache before forwarding to upstream
+		cdn := GetCDN()
+		if cdn != nil {
+			if cdn.ServeFromCache(w, r) {
+				return // Served directly from RAM cache!
+			}
+		}
+
+		// Forward to upstream
+		if s.upstreams != nil {
+			s.proxyRequest(w, r)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Mango Shield v2.0 Active (No Upstream Configured)"))
+		}
 
 	case ActionBlock:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
-		http.Error(w, "Forbidden", http.StatusForbidden)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-Mango-Shield", "blocked")
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(fmt.Sprintf(
+			"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
+				"<h1>403 Forbidden</h1><p>Access blocked by Mango Shield protection system.</p>"+
+				"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
+			action.Reason, ip,
+		)))
+
+	case ActionChallenge:
+		atomic.AddInt64(&s.stats.ChallengedReqs, 1)
+		if s.challMgr != nil {
+			s.challMgr.ServeChallenge(w, r, action.Stage, action.Difficulty)
+		} else {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("Challenge Required"))
+		}
 
 	case ActionDrop:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
@@ -505,19 +547,50 @@ func (s *Shield) adaptiveSampler() {
 	}
 }
 
-// extractIP gets real client IP from request
+// extractIP gets real client IP from request safely
+func (s *Shield) extractIP(r *http.Request) string {
+	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peerHost = r.RemoteAddr
+	}
+
+	// Check if peer is in trusted proxies list
+	if len(s.cfg.Protection.TrustedProxies) > 0 {
+		isTrusted := false
+		for _, trusted := range s.cfg.Protection.TrustedProxies {
+			if trusted == peerHost {
+				isTrusted = true
+				break
+			}
+			_, cidr, err := net.ParseCIDR(trusted)
+			if err == nil {
+				ip := net.ParseIP(peerHost)
+				if ip != nil && cidr.Contains(ip) {
+					isTrusted = true
+					break
+				}
+			}
+		}
+
+		if isTrusted {
+			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+				parts := splitFirst(xff, ",")
+				return trimSpace(parts)
+			}
+			if xri := r.Header.Get("X-Real-IP"); xri != "" {
+				return trimSpace(xri)
+			}
+		}
+	}
+
+	return peerHost
+}
+
 func extractIP(r *http.Request) string {
-	// Check X-Forwarded-For
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := splitFirst(xff, ",")
-		return trimSpace(parts)
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
 	}
-	// Check X-Real-IP
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return trimSpace(xri)
-	}
-	// Fall back to RemoteAddr
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return host
 }
 

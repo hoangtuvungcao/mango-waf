@@ -5,6 +5,12 @@ services:
     build: .
     container_name: mango-shield
     restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp
+      - /app/logs
     ports:
       - "443:443"
       - "80:80"
@@ -12,12 +18,16 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./certs:/app/certs:ro
-      - ./logs:/app/logs
       - ./data:/app/data
+      - /sys/fs/bpf:/sys/fs/bpf
     environment:
       - TZ=Asia/Ho_Chi_Minh
+    cap_drop:
+      - ALL
     cap_add:
-      - NET_ADMIN # Required for iptables
+      - NET_ADMIN
+      - BPF
+      - PERFMON
     networks:
       - shield-net
     healthcheck:

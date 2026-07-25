@@ -198,16 +198,16 @@ dashboard:
   enabled: true                # Bật giao diện điều khiển
   listen: "0.0.0.0:9090"       # Port truy cập (VD: http://IP:9090)
   username: "admin"            # Tài khoản đăng nhập
-  password: "admin123"         # Mật khẩu đăng nhập
+  password: ""                 # Mật khẩu (Dùng ENV MANGO_DASHBOARD_PASSWORD)
 
 # ═══════════════════════════════════════════════════════════
 # ALERTS — Cảnh báo tự động về Telegram/Discord
 # ═══════════════════════════════════════════════════════════
 alerts:
   telegram:
-    enabled: true              # Bật cảnh báo Telegram khi có DDoS
-    token: "6337073929:AAGsvCXWRJ6Ol-K5V1ZCJ6vmcLll-0UsnE8" #token bot telegram
-    chat_id: "5805939083"      # ID người nhận hoặc Group
+    enabled: false             # Bật cảnh báo Telegram khi có DDoS
+    token: ""                  # Token bot (hoặc ENV MANGO_ALERTS_TELEGRAM_TOKEN)
+    chat_id: ""                # ID người nhận hoặc Group
   discord:
     enabled: false             # Bật cảnh báo Discord
     webhook_url: ""            # Link Webhook của Discord
@@ -219,15 +219,11 @@ alerts:
 # ================================================================
 # 🕸️ CLUSTER P2P (Mango Mesh)
 # ================================================================
-# Dành cho hệ thống nhiều VPS (Multi-Node Cluster).
-# Các Firewall tự liên lạc với nhau qua Gossip Protocol (UDP/TCP)
-# để báo cáo IP xấu. Ví dụ: Node Hà Nội chặn IP A -> Tự báo cho
-# Node Hồ Chí Minh chặn theo chỉ trong vài Mili-Giây.
 cluster:
   enabled: true
   node_name: "mango-edge-hn"
   bind_port: 7946
   advertise_ip: "103.77.246.172"
-  secret_key: "AES-32-MANGO-SHIELD-GOSSIP-KEY!!"
+  secret_key: ""              # Khóa mã hóa Mesh (Hoặc ENV MANGO_CLUSTER_SECRET_KEY)
   join_peers:
     - "103.77.246.153:7946"
