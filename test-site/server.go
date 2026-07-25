@@ -778,7 +778,7 @@ func main() {
             if (type === 'sqli') {
                 url = "/search?q=" + encodeURIComponent("' OR 1=1--");
             } else if (type === 'xss') {
-                url = "/comment?input=" + encodeURIComponent("<script>alert('xss')</script>");
+                url = "/comment?input=" + encodeURIComponent("<script>alert('xss')<\\/script>");
             } else if (type === 'lfi') {
                 url = "/file?path=../../../../etc/passwd";
             } else if (type === 'bot') {
