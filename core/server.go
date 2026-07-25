@@ -373,15 +373,19 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	case ActionBlock:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("X-Mango-Shield", "blocked")
-		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte(fmt.Sprintf(
-			"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
-				"<h1>403 Forbidden</h1><p>Access blocked by Mango Shield protection system.</p>"+
-				"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
-			action.Reason, ip,
-		)))
+		if s.challMgr != nil {
+			s.challMgr.ServeBlockPage(w, r, ip, "WAF Rule", action.Reason)
+		} else {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-Mango-Shield", "blocked")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(fmt.Sprintf(
+				"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
+					"<h1>403 Forbidden</h1><p>Access blocked by Mango Shield protection system.</p>"+
+					"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
+				action.Reason, ip,
+			)))
+		}
 
 	case ActionChallenge:
 		atomic.AddInt64(&s.stats.ChallengedReqs, 1)

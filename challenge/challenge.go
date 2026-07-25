@@ -212,9 +212,14 @@ func (m *Manager) verifyTurnstile(w http.ResponseWriter, r *http.Request, ip str
 	return true
 }
 
+// generateRayID returns a 16-character hexadecimal Ray ID
+func generateRayID(r *http.Request) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s-%d-%s", r.RemoteAddr, time.Now().UnixNano(), r.URL.Path)))
+	return hex.EncodeToString(h[:])[:16]
+}
+
 // serveJSChallenge serves the JavaScript Proof-of-Work challenge page
 func (m *Manager) serveJSChallenge(w http.ResponseWriter, r *http.Request, difficulty int) {
-	// Generate unique challenge
 	challengeBytes := make([]byte, 16)
 	rand.Read(challengeBytes)
 	challengeStr := hex.EncodeToString(challengeBytes)
@@ -223,7 +228,15 @@ func (m *Manager) serveJSChallenge(w http.ResponseWriter, r *http.Request, diffi
 		difficulty = m.cfg.Protection.Challenge.PowDifficulty
 	}
 
-	html := fmt.Sprintf(powTemplate, challengeStr, difficulty, difficulty, r.URL.RequestURI())
+	rayID := generateRayID(r)
+	clientIP := r.RemoteAddr
+	if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
+		clientIP = cfip
+	} else if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		clientIP = strings.TrimSpace(strings.Split(xff, ",")[0])
+	}
+
+	html := fmt.Sprintf(powTemplate, r.Host, clientIP, rayID, challengeStr, difficulty, difficulty, r.URL.RequestURI())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache")
 	w.WriteHeader(http.StatusServiceUnavailable)
@@ -238,7 +251,15 @@ func (m *Manager) serveCAPTCHAChallenge(w http.ResponseWriter, r *http.Request) 
 	mac.Write([]byte(ts))
 	hash := hex.EncodeToString(mac.Sum(nil))
 
-	html := fmt.Sprintf(captchaTemplate, r.URL.RequestURI(), ts, hash)
+	rayID := generateRayID(r)
+	clientIP := r.RemoteAddr
+	if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
+		clientIP = cfip
+	} else if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		clientIP = strings.TrimSpace(strings.Split(xff, ",")[0])
+	}
+
+	html := fmt.Sprintf(captchaTemplate, r.Host, r.URL.RequestURI(), ts, hash, clientIP, rayID)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache")
 	w.WriteHeader(http.StatusServiceUnavailable)
@@ -250,5 +271,50 @@ func (m *Manager) serveSilentChallenge(w http.ResponseWriter, r *http.Request) {
 	html := fmt.Sprintf(silentTemplate, r.URL.RequestURI())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(html))
+}
+
+// ServeBlockPage serves the commercial WAF HTTP 403 Forbidden page
+func (m *Manager) ServeBlockPage(w http.ResponseWriter, r *http.Request, clientIP, ruleID, reason string) {
+	rayID := generateRayID(r)
+	ts := time.Now().UTC().Format("2006-01-02 15:04:05 UTC")
+	ruleInfo := ruleID
+	if reason != "" {
+		ruleInfo = fmt.Sprintf("%s (%s)", ruleID, reason)
+	}
+
+	html := fmt.Sprintf(blockTemplate, r.Host, clientIP, rayID, ruleInfo, ts)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Mango-Shield", "blocked")
+	w.WriteHeader(http.StatusForbidden)
+	w.Write([]byte(html))
+}
+
+// ServeRateLimitPage serves the commercial HTTP 429 Too Many Requests page
+func (m *Manager) ServeRateLimitPage(w http.ResponseWriter, r *http.Request, clientIP string, retryAfterSeconds int) {
+	rayID := generateRayID(r)
+	if retryAfterSeconds <= 0 {
+		retryAfterSeconds = 10
+	}
+
+	html := fmt.Sprintf(rateLimitTemplate, r.Host, retryAfterSeconds, clientIP, rayID, retryAfterSeconds)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+	w.Header().Set("X-Mango-Shield", "rate-limited")
+	w.WriteHeader(http.StatusTooManyRequests)
+	w.Write([]byte(html))
+}
+
+// ServeAccessDeniedPage serves the commercial HTTP 401/403 Security Policy page
+func (m *Manager) ServeAccessDeniedPage(w http.ResponseWriter, r *http.Request, clientIP, policy string) {
+	rayID := generateRayID(r)
+	if policy == "" {
+		policy = "Unauthorized Client Request"
+	}
+
+	html := fmt.Sprintf(accessDeniedTemplate, r.Host, policy, clientIP, rayID)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Mango-Shield", "denied")
+	w.WriteHeader(http.StatusForbidden)
 	w.Write([]byte(html))
 }
