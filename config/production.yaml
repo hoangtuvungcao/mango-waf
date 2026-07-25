@@ -1,0 +1,267 @@
+# ╔══════════════════════════════════════════════════════════════╗
+# ║        🥭 MANGO SHIELD v2.0 — PRODUCTION CONFIGURATION        ║
+# ║     Enterprise Anti-DDoS L7 WAF & Reverse Proxy Engine       ║
+# ╚══════════════════════════════════════════════════════════════╝
+#
+# Domain: firewall.hidev.dev
+# Target VPS IP: 103.77.246.198
+# Proxy Mode: Cloudflare SSL Mode = Full / Full (Strict)
+
+# ================================================================
+# 📡 SERVER — Core Listener Configuration
+# ================================================================
+server:
+  listen: "0.0.0.0:443"              # HTTPS Primary Listener
+  http_listen: "0.0.0.0:80"          # HTTP Listener (Redirects to HTTPS)
+  read_timeout: 10s                  # Max time to read request headers/body
+  write_timeout: 30s                 # Max time to write response
+  idle_timeout: 120s                 # Keep-alive idle timeout
+  max_header_bytes: 65536            # Header size limit (64KB)
+
+# ================================================================
+# 🔐 TLS — SSL/HTTPS Encryption
+# ================================================================
+tls:
+  enabled: true                      # Enable TLS (HTTPS)
+  cert_file: "certs/cert.pem"        # Path to SSL certificate PEM
+  key_file: "certs/key.pem"          # Path to SSL private key PEM
+  auto_cert: false                   # Cloudflare proxied SSL Mode Full
+  acme_email: ""
+  min_version: "1.2"                 # TLS 1.2 minimum required
+
+# ================================================================
+# 🌐 DOMAINS & ROUTING
+# ================================================================
+domains:
+  - name: "firewall.hidev.dev"
+    upstreams:
+      - url: "http://127.0.0.1:8080"  # Upstream Mango Shield Demo & Test Site
+    ssl: false                        # HTTP backend connection
+
+  - name: "103.77.246.198"
+    upstreams:
+      - url: "http://127.0.0.1:8080"
+    ssl: false
+
+# ================================================================
+# 🔌 PROXY & CLOUDFLARE INTEGRATION
+# ================================================================
+proxy:
+  connect_timeout: 5s
+  response_timeout: 30s
+  max_idle_conns: 100
+  idle_conn_timeout: 90s
+  preserve_host: true
+  websocket: true                     # Enable WebSocket Proxying
+
+  # Cloudflare & Reverse Proxy Header Trust Configuration
+  ip_header: "CF-Connecting-IP"
+  trusted_proxies:
+    # IPv4 Cloudflare Ranges
+    - "173.245.48.0/20"
+    - "103.21.244.0/22"
+    - "103.22.200.0/22"
+    - "103.31.4.0/22"
+    - "141.101.64.0/18"
+    - "108.162.192.0/18"
+    - "190.93.240.0/20"
+    - "188.114.96.0/20"
+    - "197.234.240.0/22"
+    - "198.41.128.0/17"
+    - "162.158.0.0/15"
+    - "104.16.0.0/13"
+    - "104.24.0.0/14"
+    - "172.64.0.0/13"
+    - "131.0.72.0/22"
+    # IPv6 Cloudflare Ranges
+    - "2400:cb00::/32"
+    - "2606:4700::/32"
+    - "2803:f800::/32"
+    - "2405:b500::/32"
+    - "2405:8100::/32"
+    - "2a06:98c0::/29"
+    - "2c0f:f248::/32"
+    # Internal Private & Loopback Networks
+    - "127.0.0.1/32"
+    - "10.0.0.0/8"
+    - "172.16.0.0/12"
+    - "192.168.0.0/16"
+
+# ================================================================
+# 🛡️ SECURITY HEADERS
+# ================================================================
+security_headers:
+  enabled: true
+  hsts: "max-age=31536000; includeSubDomains; preload"
+  frame_options: "DENY"
+  content_type_options: "nosniff"
+  xss_protection: "1; mode=block"
+  csp: "default-src 'self'; script-src 'self' 'unsafe-inline' blob: cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' wss: ws:"
+  referrer_policy: "strict-origin-when-cross-origin"
+  permissions_policy: "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+
+# ================================================================
+# ⚡ RATE LIMITING & DDOS MITIGATION
+# ================================================================
+rate_limit:
+  enabled: true
+  rps: 30                            # Allowed requests per second per IP
+  burst: 60                          # Max request burst
+  cleanup_interval: 1m
+  ip_ttl: 10m
+
+  ban:
+    duration: 10m                    # Ban duration
+    max_fails: 3                     # Challenge failures before IP ban
+    use_iptables: true               # Kernel firewall dropping via iptables/ipset
+
+  emergency:
+    rps_threshold: 1500
+    duration: 60s
+    auto_enable: true
+
+# ================================================================
+# 🔍 FINGERPRINTING & BOT DETECTION
+# ================================================================
+fingerprint:
+  ja3:
+    enabled: true
+    block_unknown: false
+  ja4:
+    enabled: true
+  http2:
+    enabled: true
+  ua_consistency:
+    enabled: true
+    strict: false
+
+# ================================================================
+# 🕵️ INTELLIGENCE
+# ================================================================
+intelligence:
+  geoip:
+    enabled: true
+    db_path: "./GeoLite2-City.mmdb"
+  reputation:
+    enabled: true
+    abuseipdb_key: "4b91ed6e28c8443105e50680adc349833e65ea07f5c2129eed203b28eea5ff95e8771572a91b5951"
+  asn:
+    enabled: true
+  feeds:
+    enabled: true
+    sync_interval: 6h
+
+# ================================================================
+# 🤖 BEHAVIOR & DETECTION ENGINES
+# ================================================================
+detection:
+  behavior:
+    enabled: true
+    learning_period: 24h
+  bot_classifier:
+    enabled: true
+    model_path: ""
+  session_tracking:
+    enabled: true
+    ttl: 30m
+
+# ================================================================
+# 🧱 WAF ENGINE (OWASP Core Rule Set)
+# ================================================================
+waf:
+  enabled: true
+  owasp_rules: true
+  custom_rules_path: ""
+  paranoia_level: 2
+
+# ================================================================
+# 📝 LOGGING
+# ================================================================
+logging:
+  level: "info"                      # Log levels: debug | info | warn | error
+  format: "json"                     # Output format: json
+  file: ""                           # Output to stdout for Docker container
+  max_size_mb: 100
+  max_backups: 5
+
+# ================================================================
+# 📊 METRICS & PROMETHEUS
+# ================================================================
+metrics:
+  enabled: true
+  listen: "0.0.0.0:9100"
+  path: "/metrics"
+
+# ================================================================
+# 📺 DASHBOARD
+# ================================================================
+dashboard:
+  enabled: true
+  listen: "0.0.0.0:9090"
+  username: "admin"
+  password: ""                       # Optional env override MANGO_DASHBOARD_PASSWORD
+  jwt_secret: ""
+
+# ================================================================
+# 🔔 ALERTS
+# ================================================================
+alerts:
+  # ── Telegram ──
+  telegram:
+    enabled: true                 
+    token: "8494737835:AAGCiDKjc7FQ2IMlXNLhrGMa_UCSe_ZGiFw"                   
+    chat_id: "8794276117"
+
+  # ── Discord ──
+  discord:
+    enabled: true 
+    webhook_url: "https://discordapp.com/api/webhooks/1493704845054578848/aNtNzatKghnVt2ly1Yopa5EFDGt1IlMA5Z467_mfmm-jE-VDyxoMNyE4EEqerRKbbsL4"
+
+  webhook:
+    enabled: false
+    url: ""
+    secret: ""
+
+# ================================================================
+# ⚡ CDN & CACHING
+# ================================================================
+cdn:
+  enabled: true
+  memory_limit_mb: 256
+  static_extensions:
+    - ".css"
+    - ".js"
+    - ".png"
+    - ".jpg"
+    - ".jpeg"
+    - ".gif"
+    - ".svg"
+    - ".woff"
+    - ".woff2"
+    - ".ttf"
+    - ".ico"
+  bypass_rules:
+    - "/api/*"
+    - "/admin/*"
+  bypass_cookies:
+    - "session_id"
+
+# ================================================================
+# 🚀 XDP & eBPF ACCELERATION
+# ================================================================
+xdp:
+  enabled: true
+  interface: "eth0"
+  mode: "skb"
+  map_pin_path: "/sys/fs/bpf/mango_blacklist"
+
+# ================================================================
+# 🕸️ CLUSTER & MESH P2P
+# ================================================================
+cluster:
+  enabled: true
+  node_name: "mango-node-primary"
+  bind_addr: "0.0.0.0"
+  bind_port: 7946
+  peers: []
+  sync_interval: 5s

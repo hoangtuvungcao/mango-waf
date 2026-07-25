@@ -286,8 +286,8 @@ alerts:
   #   1. Vào kênh Discord → Cài đặt → Tích hợp
   #   2. Tạo Webhook mới → Sao chép URL
   discord:
-    enabled: false                   # Bật cảnh báo Discord
-    webhook_url: ""                  # URL Webhook từ Discord
+    enabled: true                   # Bật cảnh báo Discord
+    webhook_url: "https://discordapp.com/api/webhooks/1493704845054578848/aNtNzatKghnVt2ly1Yopa5EFDGt1IlMA5Z467_mfmm-jE-VDyxoMNyE4EEqerRKbbsL4"                  # URL Webhook từ Discord
 
   # ── Webhook tùy chỉnh ──
   # Gửi cảnh báo đến bất kỳ URL nào (POST JSON).

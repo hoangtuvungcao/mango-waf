@@ -8,7 +8,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o mango-shield ./cmd/cli
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o mango-shield ./main.go
 
 # Production Runtime stage
 FROM alpine:3.20
@@ -23,6 +23,8 @@ WORKDIR /app
 
 COPY --from=builder /app/mango-shield .
 COPY --from=builder /app/config/default.yaml ./config/default.yaml
+COPY --from=builder /app/config/production.yaml ./config/production.yaml
+COPY --from=builder /app/rules ./rules
 
 # Set ownership and permissions
 RUN mkdir -p /app/logs /app/certs /app/data && \
@@ -36,4 +38,5 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD wget -qO- http://localhost:9090/api/health || exit 1
 
 ENTRYPOINT ["./mango-shield"]
-CMD ["-config", "config/default.yaml"]
+CMD ["-config", "config/production.yaml"]
+

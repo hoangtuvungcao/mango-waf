@@ -1,9 +1,8 @@
-version: '3.8'
-
 services:
   mango-shield:
     build: .
     container_name: mango-shield
+    command: ["-config", "config/production.yaml"]
     restart: unless-stopped
     read_only: true
     security_opt:
@@ -15,6 +14,7 @@ services:
       - "443:443"
       - "80:80"
       - "9090:9090"
+      - "9100:9100"
     volumes:
       - ./config:/app/config:ro
       - ./certs:/app/certs:ro
@@ -40,6 +40,28 @@ services:
       options:
         max-size: "50m"
         max-file: "3"
+
+  test-site:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM golang:1.24-alpine AS builder
+        WORKDIR /app
+        COPY go.mod go.sum ./
+        RUN go mod download
+        COPY . .
+        RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /test-site ./test-site/server.go
+        FROM alpine:3.20
+        WORKDIR /app
+        COPY --from=builder /test-site /app/test-site
+        EXPOSE 8080
+        ENTRYPOINT ["/app/test-site"]
+    container_name: mango-test-site
+    restart: unless-stopped
+    networks:
+      - shield-net
+    environment:
+      - TZ=Asia/Ho_Chi_Minh
 
 networks:
   shield-net:
