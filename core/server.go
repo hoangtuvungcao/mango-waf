@@ -573,6 +573,9 @@ func (s *Shield) extractIP(r *http.Request) string {
 		}
 
 		if isTrusted {
+			if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
+				return trimSpace(cfip)
+			}
 			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 				parts := splitFirst(xff, ",")
 				return trimSpace(parts)

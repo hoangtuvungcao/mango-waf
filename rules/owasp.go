@@ -24,7 +24,7 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 			Category: "protocol", Severity: "medium", Phase: 1, Paranoia: 1,
 			Targets: []string{"HEADERS"}, Operator: "rx",
 			Pattern: `^[1-9]\d*$`,
-			Action:  "block", Enabled: true,
+			Action:  "block", Enabled: false,
 			Tags: []string{"OWASP_CRS", "protocol"},
 		},
 		{

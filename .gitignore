@@ -8,7 +8,7 @@ bin/
 mango-shield
 mango-cli
 test-site/server_linux
-
+config/production.yaml
 # Test binary, built with `go test -c`
 *.test
 

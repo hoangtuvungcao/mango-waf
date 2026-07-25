@@ -35,27 +35,19 @@ tls:
 domains:
   - name: "firewall.hidev.dev"
     upstreams:
-      - url: "http://127.0.0.1:8080"  # Upstream Mango Shield Demo & Test Site
+      - url: "http://mango-test-site:8080"  # Upstream Mango Shield Demo & Test Site
     ssl: false                        # HTTP backend connection
 
   - name: "103.77.246.198"
     upstreams:
-      - url: "http://127.0.0.1:8080"
+      - url: "http://mango-test-site:8080"
     ssl: false
 
 # ================================================================
-# 🔌 PROXY & CLOUDFLARE INTEGRATION
+# 🛡️ PROTECTION & CLOUDFLARE INTEGRATION
 # ================================================================
-proxy:
-  connect_timeout: 5s
-  response_timeout: 30s
-  max_idle_conns: 100
-  idle_conn_timeout: 90s
-  preserve_host: true
-  websocket: true                     # Enable WebSocket Proxying
-
-  # Cloudflare & Reverse Proxy Header Trust Configuration
-  ip_header: "CF-Connecting-IP"
+protection:
+  mode: "auto"
   trusted_proxies:
     # IPv4 Cloudflare Ranges
     - "173.245.48.0/20"
@@ -86,6 +78,14 @@ proxy:
     - "10.0.0.0/8"
     - "172.16.0.0/12"
     - "192.168.0.0/16"
+
+proxy:
+  connect_timeout: 5s
+  response_timeout: 30s
+  max_idle_conns: 100
+  idle_conn_timeout: 90s
+  preserve_host: true
+  websocket: true                     # Enable WebSocket Proxying
 
 # ================================================================
 # 🛡️ SECURITY HEADERS
