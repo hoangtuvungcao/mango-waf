@@ -2,7 +2,7 @@ services:
   mango-shield:
     build: .
     container_name: mango-shield
-    command: ["-config", "config/production.yaml"]
+    command: [ "-config", "config/production.yaml" ]
     restart: unless-stopped
     security_opt:
       - no-new-privileges:false

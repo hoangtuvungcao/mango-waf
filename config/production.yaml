@@ -820,7 +820,7 @@ xdp:
   # Recommended Production Value: true
   # Performance Impact: Drops 10,000,000+ packets/sec at NIC driver layer with 0% CPU usage.
   # Security Impact: Ultimate volumetric DDoS protection mechanism in Linux kernel.
-  enabled: true
+  enabled: false
 
   # Purpose: Network interface name to attach XDP filter.
   # Valid Values: "eth0", "ens3", "enp1s0", "veth*"
@@ -848,11 +848,11 @@ xdp:
   # Recommended Production Value: true
   # Performance Impact: One-time compilation during container startup via clang.
   # Security Impact: Ensures eBPF bytecode matches kernel headers.
-  auto_compile: true
+  auto_compile: false
 
   # Purpose: Automatically attach compiled XDP program to network interface on startup.
   # Valid Values: true, false
-  # Recommended Production Value: true
-  # Performance Impact: Instant hardware protection on container startup.
-  # Security Impact: No manual CLI intervention required after server reboot.
-  auto_attach: true
+  # Recommended Production Value: false
+  # Performance Impact: Attaches XDP filter to network interface.
+  # Security Impact: Drops packets at NIC layer before kernel allocation.
+  auto_attach: false

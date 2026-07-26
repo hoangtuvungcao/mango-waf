@@ -11,18 +11,33 @@ import (
 )
 
 type StatsResponse struct {
-	TotalRequests int64    `json:"total_requests"`
-	PassedReqs    int64    `json:"passed_requests"`
-	BlockedReqs   int64    `json:"blocked_requests"`
-	Challenged    int64    `json:"challenged_requests"`
-	HistPassed    []uint64 `json:"hist_passed"`
-	HistBlocked   []uint64 `json:"hist_blocked"`
-	CurrPassed    uint64   `json:"curr_passed"`
-	CurrBlocked   uint64   `json:"curr_blocked"`
-	Bps           uint64   `json:"bps"`
-	Pps           uint64   `json:"pps"`
-	Status        string   `json:"status"`
-	Uptime        string   `json:"uptime"`
+	TotalRequests   int64         `json:"total_requests"`
+	PassedReqs      int64         `json:"passed_requests"`
+	BlockedReqs     int64         `json:"blocked_requests"`
+	Challenged      int64         `json:"challenged_requests"`
+	CurrentRPS      int64         `json:"current_rps"`
+	PeakRPS         int64         `json:"peak_rps"`
+	ActiveConns     int64         `json:"active_conns"`
+	ActiveBans      int64         `json:"active_bans"`
+	IsUnderAttack   bool          `json:"is_under_attack"`
+	UptimeSeconds   float64       `json:"uptime_seconds"`
+	XDPEnabled      bool          `json:"xdp_enabled"`
+	XDPBannedIPs    int64         `json:"xdp_banned_ips"`
+	XDPDroppedPkts  int64         `json:"xdp_dropped_pkts"`
+	CacheHits       int64         `json:"cache_hits"`
+	CacheMisses     int64         `json:"cache_misses"`
+	CacheBypasses   int64         `json:"cache_bypasses"`
+	MeshEnabled     bool          `json:"mesh_enabled"`
+	MeshNodes       int           `json:"mesh_nodes"`
+	MeshMembers     []interface{} `json:"mesh_members"`
+	HistPassed      []uint64      `json:"hist_passed"`
+	HistBlocked     []uint64      `json:"hist_blocked"`
+	CurrPassed      uint64        `json:"curr_passed"`
+	CurrBlocked     uint64        `json:"curr_blocked"`
+	Bps             uint64        `json:"bps"`
+	Pps             uint64        `json:"pps"`
+	Status          string        `json:"status"`
+	Uptime          string        `json:"uptime"`
 }
 
 var (
@@ -43,13 +58,14 @@ func getEnv(key, fallback string) string {
 func init() {
 	var initial []byte
 	lastJSON.Store(initial)
-	apiBaseURL = getEnv("MANGO_API_URL", "http://127.0.0.1:9090")
+	apiBaseURL = getEnv("MANGO_API_URL", "http://mango-shield:9090")
 }
 
 func fetchAPI(path string) ([]byte, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	candidates := []string{
 		apiBaseURL + path,
+		"http://mango-shield:9090" + path,
 		"http://127.0.0.1:9090" + path,
 		"http://localhost:9090" + path,
 	}
@@ -77,30 +93,43 @@ func fetchMetrics() {
 	for range ticker.C {
 		body, err := fetchAPI("/api/stats")
 		if err != nil {
-			localStats := StatsResponse{
-				Status:      "healthy",
-				Uptime:      "Active",
-				HistPassed:  histPassed,
-				HistBlocked: histBlocked,
+			localStats := map[string]interface{}{
+				"status":        "healthy",
+				"uptime":        "Active",
+				"hist_passed":   histPassed,
+				"hist_blocked":  histBlocked,
+				"total_requests": 0,
+				"passed_requests": 0,
+				"blocked_requests": 0,
 			}
 			data, _ := json.Marshal(localStats)
 			lastJSON.Store(data)
 			continue
 		}
 
-		var st StatsResponse
-		if err := json.Unmarshal(body, &st); err == nil {
+		var rawMap map[string]interface{}
+		if err := json.Unmarshal(body, &rawMap); err == nil {
+			var currPassed uint64
+			var currBlocked uint64
+
+			if p, ok := rawMap["passed_requests"].(float64); ok {
+				currPassed = uint64(p)
+			}
+			if b, ok := rawMap["blocked_requests"].(float64); ok {
+				currBlocked = uint64(b)
+			}
+
 			copy(histPassed[0:59], histPassed[1:60])
 			copy(histBlocked[0:59], histBlocked[1:60])
 
-			histPassed[59] = st.CurrPassed
-			histBlocked[59] = st.CurrBlocked
+			histPassed[59] = currPassed
+			histBlocked[59] = currBlocked
 
-			st.HistPassed = histPassed
-			st.HistBlocked = histBlocked
-			st.Status = "healthy"
+			rawMap["hist_passed"] = histPassed
+			rawMap["hist_blocked"] = histBlocked
+			rawMap["status"] = "healthy"
 
-			data, _ := json.Marshal(st)
+			data, _ := json.Marshal(rawMap)
 			lastJSON.Store(data)
 		}
 	}
