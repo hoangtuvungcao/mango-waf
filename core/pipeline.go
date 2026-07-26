@@ -298,7 +298,7 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 				"ip", ip, "type", classResult.BotType, "name", classResult.BotName, "confidence", classResult.Confidence)
 			return Action{Type: ActionDrop, Reason: "bot:" + classResult.BotType}
 		}
-		if classResult.IsBot && classResult.Threat == "high" {
+		if classResult.IsBot && classResult.Threat == "high" && !p.hasValidProof(r) {
 			return Action{Type: ActionChallenge, Reason: "bot_suspicious", Stage: 2, Difficulty: p.cfg.Protection.Challenge.PowDifficulty + 1}
 		}
 	}
@@ -313,7 +313,7 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 
 	// Layer 9: Rate limiting via detection engine (adaptive token bucket)
 	if p.detEngine != nil && p.cfg.Protection.RateLimit.Enabled {
-		if p.detEngine.CheckRateLimit(ip) {
+		if p.detEngine.CheckRateLimit(ip) && !p.hasValidProof(r) {
 			return Action{Type: ActionChallenge, Reason: "det_rate_limited", Stage: 1, Difficulty: p.cfg.Protection.Challenge.PowDifficulty}
 		}
 	}

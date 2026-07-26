@@ -645,6 +645,16 @@ func (s *Shield) extractIP(r *http.Request) string {
 }
 
 func extractIP(r *http.Request) string {
+	if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
+		return trimSpace(cfip)
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return trimSpace(xri)
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := splitFirst(xff, ",")
+		return trimSpace(parts)
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
