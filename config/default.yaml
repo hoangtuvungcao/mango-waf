@@ -343,3 +343,15 @@ cluster:
   join_peers: []                     # Danh sách IP của các máy đã có trong cụm để kết nối
   # Ví dụ (Node 2 nối vào Node 1):
   # join_peers: ["103.77.246.172:7946"]
+
+# ================================================================
+# XDP & eBPF ACCELERATION
+# ================================================================
+xdp:
+  enabled: true                      # Bật XDP Kernel Packet Dropping
+  interface: "eth0"                  # Tên giao diện mạng NIC
+  mode: "skb"                        # Mode: skb (generic) | drv (native) | hw (offload)
+  map_pin_path: "/sys/fs/bpf/mango_blacklist" # Đường dẫn BPF map pinned
+  auto_compile: true                 # Tự động biên dịch xdp/mango_xdp.c khi thiếu
+  auto_attach: true                  # Tự động attach XDP vào NIC khi khởi động
+

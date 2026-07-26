@@ -396,6 +396,23 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("Challenge Required"))
 		}
 
+	case ActionRateLimit:
+		atomic.AddInt64(&s.stats.BlockedRequests, 1)
+		if s.challMgr != nil {
+			s.challMgr.ServeRateLimitPage(w, r, ip, 10)
+		} else {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Retry-After", "10")
+			w.Header().Set("X-Mango-Shield", "rate-limited")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(fmt.Sprintf(
+				"<html><body style='background:#111;color:#f90;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
+					"<h1>429 Too Many Requests</h1><p>Rate limit exceeded on Mango Shield.</p>"+
+					"<p style='color:#666;font-size:12px;'>IP: %s</p></body></html>",
+				ip,
+			)))
+		}
+
 	case ActionDrop:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
 		// Silently close connection

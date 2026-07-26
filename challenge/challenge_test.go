@@ -81,3 +81,29 @@ func TestVerifyTurnstileTimestampValidation(t *testing.T) {
 		t.Errorf("verifyTurnstile should reject future timestamp %d", futureTS)
 	}
 }
+
+func TestServeRateLimitPage(t *testing.T) {
+	cfg := &config.Config{}
+	mgr := NewManager(cfg)
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rec := httptest.NewRecorder()
+
+	mgr.ServeRateLimitPage(rec, req, "198.51.100.42", 10)
+
+	if rec.Code != 429 {
+		t.Errorf("expected status code 429 Too Many Requests, got %d", rec.Code)
+	}
+
+	if rec.Header().Get("Retry-After") != "10" {
+		t.Errorf("expected Retry-After header '10', got '%s'", rec.Header().Get("Retry-After"))
+	}
+
+	if rec.Header().Get("X-Mango-Shield") != "rate-limited" {
+		t.Errorf("expected X-Mango-Shield header 'rate-limited', got '%s'", rec.Header().Get("X-Mango-Shield"))
+	}
+
+	if !strings.Contains(rec.Body.String(), "429 Too Many Requests") {
+		t.Errorf("expected body to contain '429 Too Many Requests'")
+	}
+}

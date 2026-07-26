@@ -1,12 +1,19 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"runtime"
+	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"mango-waf/cluster"
@@ -122,6 +129,7 @@ func (d *Dashboard) registerRoutes() {
 	d.mux.HandleFunc("/api/health", d.handleHealth)
 	d.mux.HandleFunc("/api/config", d.handleConfig)
 	d.mux.HandleFunc("/api/rps-history", d.handleRPSHistory)
+	d.mux.HandleFunc("/api/system-stats", d.handleSystemStats)
 	d.mux.HandleFunc("/api/cache/purge", d.handleCachePurge)
 	d.mux.HandleFunc("/", d.handleDashboardUI)
 }
@@ -185,6 +193,194 @@ func (d *Dashboard) handleRPSHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"rps": d.rpsHist.Slice()})
 }
 
+// ================================================
+// Real Linux System Stats from /proc
+// ================================================
+
+var (
+	prevCPUIdle  uint64
+	prevCPUTotal uint64
+	cpuMu        sync.Mutex
+)
+
+func readCPUUsage() float64 {
+	f, err := os.Open("/proc/stat")
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() {
+		return 0
+	}
+	line := scanner.Text()
+	fields := strings.Fields(line)
+	if len(fields) < 5 || fields[0] != "cpu" {
+		return 0
+	}
+
+	var total, idle uint64
+	for i := 1; i < len(fields); i++ {
+		val, _ := strconv.ParseUint(fields[i], 10, 64)
+		total += val
+		if i == 4 {
+			idle = val
+		}
+	}
+
+	cpuMu.Lock()
+	defer cpuMu.Unlock()
+
+	dTotal := total - prevCPUTotal
+	dIdle := idle - prevCPUIdle
+	prevCPUTotal = total
+	prevCPUIdle = idle
+
+	if dTotal == 0 {
+		return 0
+	}
+	return float64(dTotal-dIdle) / float64(dTotal) * 100
+}
+
+func readMemInfo() (totalMB, usedMB, availMB uint64) {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	vals := map[string]uint64{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 {
+			key := strings.TrimSuffix(fields[0], ":")
+			val, _ := strconv.ParseUint(fields[1], 10, 64)
+			vals[key] = val
+		}
+	}
+	totalMB = vals["MemTotal"] / 1024
+	availMB = vals["MemAvailable"] / 1024
+	usedMB = totalMB - availMB
+	return
+}
+
+func readDiskUsage() (totalGB, usedGB float64, usedPct float64) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs("/", &stat); err != nil {
+		return
+	}
+	total := stat.Blocks * uint64(stat.Bsize)
+	free := stat.Bfree * uint64(stat.Bsize)
+	used := total - free
+	totalGB = float64(total) / (1024 * 1024 * 1024)
+	usedGB = float64(used) / (1024 * 1024 * 1024)
+	if total > 0 {
+		usedPct = float64(used) / float64(total) * 100
+	}
+	return
+}
+
+func readLoadAvg() (load1, load5, load15 float64) {
+	data, err := os.ReadFile("/proc/loadavg")
+	if err != nil {
+		return
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) >= 3 {
+		load1, _ = strconv.ParseFloat(fields[0], 64)
+		load5, _ = strconv.ParseFloat(fields[1], 64)
+		load15, _ = strconv.ParseFloat(fields[2], 64)
+	}
+	return
+}
+
+func readNetworkStats() (rxBytes, txBytes uint64) {
+	f, err := os.Open("/proc/net/dev")
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "eth0:") || strings.HasPrefix(line, "ens") || strings.HasPrefix(line, "enp") {
+			parts := strings.Fields(line)
+			if len(parts) >= 10 {
+				rx, _ := strconv.ParseUint(parts[1], 10, 64)
+				tx, _ := strconv.ParseUint(parts[9], 10, 64)
+				rxBytes += rx
+				txBytes += tx
+			}
+		}
+	}
+	return
+}
+
+func readUptime() float64 {
+	data, err := os.ReadFile("/proc/uptime")
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) >= 1 {
+		val, _ := strconv.ParseFloat(fields[0], 64)
+		return val
+	}
+	return 0
+}
+
+func readTCPConnections() int {
+	count := 0
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			count++
+		}
+		f.Close()
+	}
+	if count >= 2 {
+		count -= 2 // subtract header lines
+	}
+	return count
+}
+
+func (d *Dashboard) handleSystemStats(w http.ResponseWriter, r *http.Request) {
+	cpuPct := readCPUUsage()
+	ramTotal, ramUsed, ramAvail := readMemInfo()
+	diskTotal, diskUsed, diskPct := readDiskUsage()
+	load1, load5, load15 := readLoadAvg()
+	rxBytes, txBytes := readNetworkStats()
+	uptime := readUptime()
+	conns := readTCPConnections()
+
+	writeJSON(w, map[string]interface{}{
+		"cpu_percent":    cpuPct,
+		"ram_total_mb":   ramTotal,
+		"ram_used_mb":    ramUsed,
+		"ram_avail_mb":   ramAvail,
+		"disk_total_gb":  diskTotal,
+		"disk_used_gb":   diskUsed,
+		"disk_used_pct":  diskPct,
+		"load_1m":        load1,
+		"load_5m":        load5,
+		"load_15m":       load15,
+		"net_rx_bytes":   rxBytes,
+		"net_tx_bytes":   txBytes,
+		"tcp_connections": conns,
+		"uptime_seconds": uptime,
+		"goroutines":    runtime.NumGoroutine(),
+		"num_cpu":       runtime.NumCPU(),
+		"timestamp":     time.Now().Unix(),
+	})
+}
+
 func (d *Dashboard) handleDashboardUI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(fullDashboardHTML))
@@ -192,11 +388,12 @@ func (d *Dashboard) handleDashboardUI(w http.ResponseWriter, r *http.Request) {
 
 func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/health" {
+		// Read-only telemetry endpoints accessible for monitoring & demo site
+		if r.URL.Path == "/api/health" || r.URL.Path == "/api/stats" || r.URL.Path == "/api/system-stats" || r.URL.Path == "/api/rps-history" || r.URL.Path == "/" {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if d.cfg.Dashboard.Username != "" {
+		if d.cfg.Dashboard.Username != "" && d.cfg.Dashboard.Password != "" {
 			user, pass, ok := r.BasicAuth()
 			uMatch := subtle.ConstantTimeCompare([]byte(user), []byte(d.cfg.Dashboard.Username)) == 1
 			pMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(d.cfg.Dashboard.Password)) == 1
@@ -608,6 +805,30 @@ canvas#chart { width: 100%% !important; height: 220px !important; }
   color: var(--text-muted);
   font-size: 12px;
   border-top: 1px solid rgba(51, 65, 85, 0.3);
+}
+
+/* ======================== RESPONSIVE ======================== */
+@media (max-width: 768px) {
+  .nav-hdr { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
+  .brand-title { font-size: 16px; }
+  .brand-title span.ver-tag { display: none; }
+  .hdr-controls { width: 100%%; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+  .dashboard-container { padding: 16px 12px; }
+  .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .kpi-card .kpi-val { font-size: 22px; }
+  .chart-container { height: 160px; }
+  canvas#chart { height: 160px !important; }
+  .col-grid-2 { grid-template-columns: 1fr; }
+  .terminal-box { max-height: 180px; font-size: 11px; }
+  .modal-content { width: calc(100%% - 32px); max-width: 400px; }
+  .mesh-nodes-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  .kpi-grid { grid-template-columns: 1fr; }
+  .kpi-card .kpi-val { font-size: 20px; }
+  .nav-hdr { padding: 8px; }
+  .btn-action { padding: 6px 10px; font-size: 12px; }
+  .status-pill { font-size: 11px; padding: 4px 10px; }
 }
 </style>
 </head>

@@ -69,6 +69,17 @@ dashboard:
   password: ""                 # Set via MANGO_DASHBOARD_PASSWORD env var
 ```
 
+### `xdp` Section (Kernel eBPF/XDP Acceleration)
+```yaml
+xdp:
+  enabled: true                      # Enable eBPF/XDP kernel packet dropping
+  interface: "eth0"                  # Target network interface
+  mode: "skb"                        # "skb" (generic) | "drv" (native) | "hw" (offload)
+  map_pin_path: "/sys/fs/bpf/mango_blacklist" # Pinned BPF map location
+  auto_compile: true                 # Auto-compile xdp/mango_xdp.c if object missing
+  auto_attach: true                  # Auto-attach XDP filter on server startup
+```
+
 ### `cluster` Section
 ```yaml
 cluster:

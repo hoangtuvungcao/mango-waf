@@ -8,30 +8,39 @@
 #define bpf_htons(x) __builtin_bswap16(x)
 #endif
 
-// This map stores the banned IPs. The key is a 32-bit IPv4 address, and the value is a 64-bit counter of dropped packets.
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1000000); // Support up to 1 Million banned IPs
-    __type(key, __u32);
-    __type(value, __u64);
-} blacklist SEC(".maps");
+// Legacy bpf_map_def structure for iproute2 ELF BPF loader
+struct bpf_map_def {
+    unsigned int type;
+    unsigned int key_size;
+    unsigned int value_size;
+    unsigned int max_entries;
+    unsigned int map_flags;
+};
 
-// Main XDP program
+// BPF Map for banned IPv4 addresses
+struct bpf_map_def SEC("maps") blacklist = {
+    .type = BPF_MAP_TYPE_HASH,
+    .key_size = sizeof(__u32),
+    .value_size = sizeof(__u64),
+    .max_entries = 1000000,
+    .map_flags = 0,
+};
+
+// Main XDP program entry point
 SEC("xdp_mango")
 int xdp_drop_banned(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
 
-    // 1. Check if packet is large enough to contain Ethernet header
+    // 1. Check Ethernet header bounds
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    // 2. Parse L2 / VLAN encapsulation
+    // 2. Parse L2 / 802.1Q / 802.1ad VLAN tags
     __u16 h_proto = eth->h_proto;
     void *l3_hdr = (void *)(eth + 1);
 
-    // Support 802.1Q and 802.1ad VLAN tags
     if (h_proto == bpf_htons(ETH_P_8021Q) || h_proto == bpf_htons(0x88A8)) {
         struct vlan_hdr {
             __be16 tci;
@@ -48,28 +57,22 @@ int xdp_drop_banned(struct xdp_md *ctx) {
     if (h_proto != bpf_htons(ETH_P_IP))
         return XDP_PASS;
 
-    // 3. Check if packet is large enough to contain IP header
+    // 3. Inspect IPv4 header bounds
     struct iphdr *ip = l3_hdr;
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
-    // 4. Extract the Source IP Address
+    // 4. Extract Source IPv4 address
     __u32 src_ip = ip->saddr;
 
-    // 5. Lookup the Source IP in the BPF map (Blacklist)
+    // 5. Query BPF blacklist HASH map
     __u64 *drop_count = bpf_map_lookup_elem(&blacklist, &src_ip);
-    
-    // 6. If IP is in the blacklist, drop the packet instantly
     if (drop_count) {
-        // Increment the drop counter for analytics (optional)
         __sync_fetch_and_add(drop_count, 1);
-        
-        // Return XDP_DROP to discard the packet at the NIC level (Super fast!)
-        return XDP_DROP;
+        return XDP_DROP; // Discard packet at NIC layer
     }
 
-    // 7. Otherwise, pass the packet to the Linux Kernel (to NGINX/Mango WAF)
-    return XDP_PASS;
+    return XDP_PASS; // Pass clean traffic to Linux kernel stack
 }
 
 char _license[] SEC("license") = "GPL";

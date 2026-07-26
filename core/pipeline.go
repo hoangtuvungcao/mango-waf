@@ -26,6 +26,7 @@ const (
 	ActionAllow ActionType = iota
 	ActionChallenge
 	ActionBlock
+	ActionRateLimit
 	ActionDrop
 )
 
@@ -87,7 +88,7 @@ func NewPipeline(s *Shield) *Pipeline {
 		shield: s,
 		cfg:    s.cfg,
 		alerts: NewAlertManager(s.cfg),
-		xdpMgr: NewXDPManager(),
+		xdpMgr: NewXDPManager(s.cfg),
 	}
 }
 
@@ -210,7 +211,7 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 				return Action{Type: ActionDrop, Reason: "rate_limit_persistent"}
 			}
 
-			return Action{Type: ActionChallenge, Reason: "rate_limited", Stage: 1, Difficulty: p.cfg.Protection.Challenge.PowDifficulty}
+			return Action{Type: ActionRateLimit, Reason: "rate_limited"}
 		}
 	}
 

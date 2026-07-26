@@ -8,9 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"strconv"
 	"strings"
 	"unsafe"
 
+	"mango-waf/config"
 	"mango-waf/logger"
 
 	"golang.org/x/sys/unix"
@@ -22,29 +24,44 @@ type XDPManager struct {
 	MapName       string
 	BPFToolBinary string
 	mapFD         int // Native File Descriptor for zero-fork BPF map updates
+	mapID         int // BPF Map ID for bpftool operations
 }
 
-func NewXDPManager() *XDPManager {
+func NewXDPManager(cfg *config.Config) *XDPManager {
 	x := &XDPManager{
 		MapName: "blacklist",
 		mapFD:   -1,
+		mapID:   -1,
 	}
 
-	// 1. Must be root to mess with eBPF maps
-	currentUser, err := user.Current()
-	if err != nil || currentUser.Uid != "0" {
-		logger.Warn("XDP requires root privileges. XDP hardware dropping disabled.")
+	if cfg == nil || !cfg.XDP.Enabled {
+		logger.Info("XDP hardware dropping is disabled in configuration.")
 		return x
 	}
 
-	// 2. Try to open pinned map descriptor at /sys/fs/bpf/mango_blacklist or /sys/fs/bpf/blacklist
+	// 1. Ensure /sys/fs/bpf is mounted
+	if _, err := os.Stat("/sys/fs/bpf"); os.IsNotExist(err) {
+		_ = os.MkdirAll("/sys/fs/bpf", 0755)
+		_ = exec.Command("mount", "-t", "bpf", "bpffs", "/sys/fs/bpf").Run()
+	}
+
+	// 2. Try auto-attachment if enabled
+	if cfg.XDP.AutoAttach {
+		x.ensureAttached(cfg)
+	}
+
+	// 3. Try to open pinned map descriptor at configured or fallback paths
 	pinPaths := []string{
+		cfg.XDP.MapPinPath,
 		"/sys/fs/bpf/mango_blacklist",
 		"/sys/fs/bpf/blacklist",
 		"/sys/fs/bpf/tc/globals/blacklist",
 	}
 
 	for _, pinPath := range pinPaths {
+		if pinPath == "" {
+			continue
+		}
 		fd, err := bpfObjGet(pinPath)
 		if err == nil && fd > 0 {
 			x.mapFD = fd
@@ -54,23 +71,131 @@ func NewXDPManager() *XDPManager {
 		}
 	}
 
-	// 3. Fallback: discover bpftool for bootstrap
+	// 4. Fallback: discover bpftool for bootstrap and map discovery
 	path, err := exec.LookPath("bpftool")
 	if err != nil {
-		path = "/usr/sbin/bpftool" // fallback
+		path = "/usr/sbin/bpftool"
 	}
 	if _, err := os.Stat(path); err == nil {
 		x.BPFToolBinary = path
-		cmd := exec.Command(x.BPFToolBinary, "map", "show", "name", x.MapName)
-		if err := cmd.Run(); err == nil {
+		mapID := findBPFMapID(path, x.MapName)
+		if mapID > 0 {
+			x.mapID = mapID
 			x.Enabled = true
-			logger.Info("XDP eBPF Hardware Dropping Enabled via bpftool bootstrap.")
+			logger.Info("XDP eBPF Hardware Dropping Enabled via bpftool bootstrap", "map_id", mapID)
 			return x
 		}
 	}
 
-	logger.Warn("XDP map 'blacklist' not found. Ensure xdp_mango runs successfully on NIC.")
+	// Check root privilege for informative warning
+	if currentUser, err := user.Current(); err == nil && currentUser.Uid != "0" {
+		logger.Warn("XDP requires root / CAP_BPF privileges and attached NIC filter. Run xdp/setup_xdp.sh or set auto_attach: true.")
+	} else {
+		logger.Warn("XDP map 'blacklist' not found. Run xdp/setup_xdp.sh or ensure xdp_mango runs on NIC.")
+	}
 	return x
+}
+
+type BPFMapInfo struct {
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	BytesKey   int    `json:"bytes_key"`
+	BytesValue int    `json:"bytes_value"`
+	MaxEntries int    `json:"max_entries"`
+}
+
+func findBPFMapID(bpftoolPath, mapName string) int {
+	out, err := exec.Command(bpftoolPath, "-j", "map", "show").Output()
+	if err != nil {
+		return -1
+	}
+	var maps []BPFMapInfo
+	if err := json.Unmarshal(out, &maps); err != nil {
+		return -1
+	}
+	for _, m := range maps {
+		if m.Name == mapName || (m.Type == "hash" && m.BytesKey == 4 && m.BytesValue == 8 && m.MaxEntries == 1000000) {
+			return m.ID
+		}
+	}
+	return -1
+}
+
+func (x *XDPManager) ensureAttached(cfg *config.Config) {
+	nic := cfg.XDP.Interface
+	if nic == "" {
+		nic = detectDefaultInterface()
+	}
+	if nic == "" {
+		return
+	}
+
+	// Check if already attached to NIC
+	out, err := exec.Command("ip", "link", "show", "dev", nic).Output()
+	if err == nil && strings.Contains(string(out), "xdp") {
+		logger.Info("XDP filter already attached to network interface", "interface", nic)
+		return
+	}
+
+	// Compile C source if mango_xdp.o missing and clang exists
+	objFile := "xdp/mango_xdp.o"
+	if _, err := os.Stat(objFile); os.IsNotExist(err) {
+		if cfg.XDP.AutoCompile {
+			if _, err := exec.LookPath("clang"); err == nil {
+				archPath := fmt.Sprintf("/usr/include/%s-linux-gnu", getMachineArch())
+				cmd := exec.Command("clang", "-O2", "-g", "-target", "bpf", "-c", "xdp/mango_xdp.c", "-o", objFile, "-I"+archPath, "-I/usr/include")
+				if err := cmd.Run(); err == nil {
+					logger.Info("Auto-compiled xdp/mango_xdp.c successfully")
+				}
+			}
+		}
+	}
+
+	// Attach XDP object to NIC
+	if _, err := os.Stat(objFile); err == nil {
+		modeFlag := "xdpgeneric"
+		if cfg.XDP.Mode == "drv" || cfg.XDP.Mode == "native" {
+			modeFlag = "xdpdrv"
+		}
+		cmd := exec.Command("ip", "link", "set", "dev", nic, modeFlag, "obj", objFile, "sec", "xdp_mango")
+		if err := cmd.Run(); err != nil {
+			logger.Warn("Failed to auto-attach XDP to network interface", "interface", nic, "error", err)
+		} else {
+			logger.Info("Auto-attached XDP filter to network interface", "interface", nic, "mode", modeFlag)
+
+			// Pin map to /sys/fs/bpf/mango_blacklist if not already pinned
+			pinPath := cfg.XDP.MapPinPath
+			if pinPath == "" {
+				pinPath = "/sys/fs/bpf/mango_blacklist"
+			}
+			if _, err := os.Stat(pinPath); os.IsNotExist(err) {
+				_ = exec.Command("bpftool", "map", "pin", "name", "blacklist", pinPath).Run()
+			}
+		}
+	}
+}
+
+func detectDefaultInterface() string {
+	out, err := exec.Command("ip", "route", "show", "default").Output()
+	if err != nil {
+		return "eth0"
+	}
+	fields := strings.Fields(string(out))
+	for i, f := range fields {
+		if f == "dev" && i+1 < len(fields) {
+			return fields[i+1]
+		}
+	}
+	return "eth0"
+}
+
+func getMachineArch() string {
+	out, err := exec.Command("uname", "-m").Output()
+	if err != nil {
+		return "x86_64"
+	}
+	return strings.TrimSpace(string(out))
 }
 
 // BanIP pushes the banned IP address securely down to the NIC driver layer
@@ -100,12 +225,17 @@ func (x *XDPManager) BanIP(ipAddr string) error {
 		return nil
 	}
 
-	// Subprocess fallback
+	// Subprocess fallback by mapID or map name
 	if x.BPFToolBinary != "" {
 		hexIP := fmt.Sprintf("hex %02x %02x %02x %02x", ipv4[0], ipv4[1], ipv4[2], ipv4[3])
 		hexVal := "hex 00 00 00 00 00 00 00 00"
 
-		args := []string{"map", "update", "name", x.MapName, "key"}
+		var args []string
+		if x.mapID > 0 {
+			args = []string{"map", "update", "id", strconv.Itoa(x.mapID), "key"}
+		} else {
+			args = []string{"map", "update", "name", x.MapName, "key"}
+		}
 		args = append(args, strings.Split(hexIP, " ")...)
 		args = append(args, "value")
 		args = append(args, strings.Split(hexVal, " ")...)
@@ -143,7 +273,12 @@ func (x *XDPManager) UnbanIP(ipAddr string) error {
 
 	if x.BPFToolBinary != "" {
 		hexIP := fmt.Sprintf("hex %02x %02x %02x %02x", ipv4[0], ipv4[1], ipv4[2], ipv4[3])
-		args := []string{"map", "delete", "name", x.MapName, "key"}
+		var args []string
+		if x.mapID > 0 {
+			args = []string{"map", "delete", "id", strconv.Itoa(x.mapID), "key"}
+		} else {
+			args = []string{"map", "delete", "name", x.MapName, "key"}
+		}
 		args = append(args, strings.Split(hexIP, " ")...)
 
 		cmd := exec.Command(x.BPFToolBinary, args...)
@@ -217,7 +352,12 @@ func (x *XDPManager) GetStats() (int64, int64) {
 	}
 
 	if x.BPFToolBinary != "" {
-		cmd := exec.Command(x.BPFToolBinary, "-j", "map", "dump", "name", x.MapName)
+		var cmd *exec.Cmd
+		if x.mapID > 0 {
+			cmd = exec.Command(x.BPFToolBinary, "-j", "map", "dump", "id", strconv.Itoa(x.mapID))
+		} else {
+			cmd = exec.Command(x.BPFToolBinary, "-j", "map", "dump", "name", x.MapName)
+		}
 		out, err := cmd.Output()
 		if err != nil {
 			return 0, 0

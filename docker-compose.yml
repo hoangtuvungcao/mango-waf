@@ -4,9 +4,8 @@ services:
     container_name: mango-shield
     command: ["-config", "config/production.yaml"]
     restart: unless-stopped
-    read_only: true
     security_opt:
-      - no-new-privileges:true
+      - no-new-privileges:false
     tmpfs:
       - /tmp
       - /app/logs
@@ -22,12 +21,11 @@ services:
       - /sys/fs/bpf:/sys/fs/bpf
     environment:
       - TZ=Asia/Ho_Chi_Minh
-    cap_drop:
-      - ALL
     cap_add:
       - NET_ADMIN
       - BPF
       - PERFMON
+      - SYS_ADMIN
     networks:
       - shield-net
     healthcheck:
@@ -62,6 +60,8 @@ services:
       - shield-net
     environment:
       - TZ=Asia/Ho_Chi_Minh
+      - MANGO_DOMAIN=firewall.hidev.dev
+      - MANGO_API_URL=http://mango-shield:9090
 
 networks:
   shield-net:

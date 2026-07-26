@@ -7,13 +7,15 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/opt/mango-shield
-ExecStart=/opt/mango-shield/mango-shield -config /opt/mango-shield/config/deploy.yaml
+ExecStart=/opt/mango-shield/mango-shield -config /opt/mango-shield/config/production.yaml
 Restart=always
 RestartSec=5
 
-# Security
+# Security & Capabilities for eBPF/XDP
 LimitNOFILE=65535
 LimitNPROC=4096
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_BIND_SERVICE
 
 # Environment
 Environment=GOMAXPROCS=0

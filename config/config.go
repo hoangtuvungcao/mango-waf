@@ -30,6 +30,7 @@ type Config struct {
 	Alerts       AlertsConfig      `yaml:"alerts"`
 	CDN          CDNConfig         `yaml:"cdn"`
 	Cluster      ClusterConfig     `yaml:"cluster"`
+	XDP          XDPConfig         `yaml:"xdp"`
 }
 
 type ServerConfig struct {
@@ -259,6 +260,15 @@ type ClusterConfig struct {
 	SecretKey   string   `yaml:"secret_key"`
 }
 
+type XDPConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	Interface   string `yaml:"interface"`
+	Mode        string `yaml:"mode"` // "skb", "native", "offload"
+	MapPinPath  string `yaml:"map_pin_path"`
+	AutoCompile bool   `yaml:"auto_compile"`
+	AutoAttach  bool   `yaml:"auto_attach"`
+}
+
 var (
 	global     *Config
 	globalLock sync.RWMutex
@@ -399,6 +409,15 @@ func setDefaults(cfg *Config) {
 	}
 	if cfg.Protection.Mode == "" {
 		cfg.Protection.Mode = "auto"
+	}
+	if cfg.XDP.Interface == "" {
+		cfg.XDP.Interface = "eth0"
+	}
+	if cfg.XDP.Mode == "" {
+		cfg.XDP.Mode = "skb"
+	}
+	if cfg.XDP.MapPinPath == "" {
+		cfg.XDP.MapPinPath = "/sys/fs/bpf/mango_blacklist"
 	}
 }
 

@@ -76,6 +76,7 @@ For technical deep dives, see [ARCHITECTURE.md](ARCHITECTURE.md).
 ## Documentation Index
 
 - [INSTALL.md](INSTALL.md) — Prerequisites, compilation, and systemd service configuration.
+- [docs/XDP_GUIDE.md](docs/XDP_GUIDE.md) — Authoritative eBPF/XDP hardware packet filtering, map inspection, and drop verification guide.
 - [CONFIGURATION.md](CONFIGURATION.md) — Comprehensive YAML configuration options reference.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — System design, eBPF map mechanics, pipeline flow, and concurrency model.
 - [API.md](API.md) — Dashboard REST API endpoints and schema specifications.
