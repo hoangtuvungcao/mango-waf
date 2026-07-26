@@ -8,14 +8,16 @@
 #define bpf_htons(x) __builtin_bswap16(x)
 #endif
 
-// Legacy bpf_map_def structure for iproute2 ELF BPF loader
-struct bpf_map_def {
+#ifndef BPF_MAP_DEF
+#define BPF_MAP_DEF
+struct bpf_map_def_legacy {
     unsigned int type;
     unsigned int key_size;
     unsigned int value_size;
     unsigned int max_entries;
     unsigned int map_flags;
 };
+#endif
 
 // BPF Map for banned IPv4 addresses
 struct bpf_map_def SEC("maps") blacklist = {
