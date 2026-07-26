@@ -242,12 +242,7 @@ func (s *Shield) Start() error {
 
 			switch state {
 			case http.StateNew:
-				active := atomic.AddInt64(&s.stats.ActiveConns, 1)
-				if active > 100000 {
-					atomic.AddInt64(&s.stats.ActiveConns, -1)
-					conn.Close()
-					return
-				}
+				atomic.AddInt64(&s.stats.ActiveConns, 1)
 				// Do not apply socket-level CPS/Conn bans to trusted proxies (Cloudflare)
 				if s.pipeline.isTrustedProxy(ip) {
 					return
@@ -386,6 +381,11 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	switch action.Type {
 	case ActionAllow:
 		atomic.AddInt64(&s.stats.PassedRequests, 1)
+
+		// Seamless active user session cookie: issue cookie to active visitors so DDoS attacks never prompt them with Captcha!
+		if s.challMgr != nil && !s.pipeline.hasValidProof(r) {
+			s.challMgr.SetSessionCookie(w, r, ip)
+		}
 
 		// Check CDN Cache before forwarding to upstream
 		cdn := GetCDN()

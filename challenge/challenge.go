@@ -54,17 +54,18 @@ func (m *Manager) ServeChallenge(w http.ResponseWriter, r *http.Request, stage i
 	}
 }
 
-// VerifyProof verifies a challenge proof cookie
+// VerifyProof verifies a challenge proof cookie or active session cookie
 func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
 	cookie, err := r.Cookie("mango_proof")
 	if err != nil || cookie.Value == "" {
-		logger.Debug("Challenge missing mango_proof cookie", "ip", currentIP)
-		return false
+		cookie, err = r.Cookie("mango_session")
+		if err != nil || cookie.Value == "" {
+			return false
+		}
 	}
 
 	parts := strings.SplitN(cookie.Value, "|", 2)
 	if len(parts) != 2 {
-		logger.Warn("Challenge proof format invalid", "value", cookie.Value)
 		return false
 	}
 
@@ -77,18 +78,14 @@ func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
 	expected := hex.EncodeToString(mac.Sum(nil))
 
 	if !hmac.Equal([]byte(sig), []byte(expected)) {
-		logger.Warn("Challenge proof HMAC mismatch", "payload", payload)
 		return false
 	}
 
 	// Check expiry (payload format: "ip_timestamp")
 	payloadParts := strings.SplitN(payload, "_", 2)
 	if len(payloadParts) == 2 {
-		// Enforce IP matching - this prevents session hijacking
-		// and fixes the redirect loop caused by IP mismatches
 		cookieIP := payloadParts[0]
 		if cookieIP != currentIP {
-			logger.Warn("IP Mismatch in cookie verification", "cookie_ip", cookieIP, "request_ip", currentIP)
 			return false
 		}
 
@@ -96,12 +93,10 @@ func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
 		if err == nil {
 			issued := time.Unix(ts, 0)
 			if time.Since(issued) > m.cfg.Protection.Challenge.CookieTTL {
-				logger.Warn("Challenge proof expired", "issued", issued)
 				return false // Expired
 			}
 		}
 	} else {
-		logger.Warn("Challenge proof payload format invalid", "payload", payload)
 		return false
 	}
 
@@ -110,6 +105,15 @@ func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
 
 // SetProofCookie sets a signed proof cookie
 func (m *Manager) SetProofCookie(w http.ResponseWriter, r *http.Request, ip string) {
+	m.setCookieWithName(w, r, ip, "mango_proof")
+}
+
+// SetSessionCookie sets a signed seamless session cookie for active visitors
+func (m *Manager) SetSessionCookie(w http.ResponseWriter, r *http.Request, ip string) {
+	m.setCookieWithName(w, r, ip, "mango_session")
+}
+
+func (m *Manager) setCookieWithName(w http.ResponseWriter, r *http.Request, ip string, name string) {
 	payload := fmt.Sprintf("%s_%d", ip, time.Now().Unix())
 
 	mac := hmac.New(sha256.New, m.secret)
@@ -117,7 +121,7 @@ func (m *Manager) SetProofCookie(w http.ResponseWriter, r *http.Request, ip stri
 	sig := hex.EncodeToString(mac.Sum(nil))
 
 	cookie := &http.Cookie{
-		Name:     "mango_proof",
+		Name:     name,
 		Value:    payload + "|" + sig,
 		Path:     "/",
 		MaxAge:   int(m.cfg.Protection.Challenge.CookieTTL.Seconds()),
