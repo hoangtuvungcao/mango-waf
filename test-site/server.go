@@ -1208,7 +1208,7 @@ function fetchStats() {
     // Block rate
     var br = d.total_requests > 0 ? Math.round((d.blocked_requests / d.total_requests) * 100) : 0;
     setProgress('h_brate', 'h_bbar', br);
-    var cl = Math.min(100, Math.round((d.active_conns || 0) / 100 * 100));
+    var cl = Math.min(100, Math.round(((d.active_conns || 0) / 10000) * 100));
     setProgress('h_cload', 'h_cbar', cl);
 
     // Uptime

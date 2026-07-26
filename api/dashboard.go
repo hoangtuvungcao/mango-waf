@@ -1119,7 +1119,7 @@ function updateStats() {
     brm.style.width = br + '%%';
     brm.className = 'meter-bar ' + (br > 50 ? 'r' : br > 20 ? 'y' : 'g');
 
-    var cl = Math.min(100, Math.round((d.active_conns / 100) * 100));
+    var cl = Math.min(100, Math.round(((d.active_conns || 0) / 10000) * 100));
     document.getElementById('cl').textContent = cl + '%%';
     var clm = document.getElementById('clm');
     clm.style.width = cl + '%%';

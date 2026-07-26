@@ -243,7 +243,7 @@ func (s *Shield) Start() error {
 			switch state {
 			case http.StateNew:
 				active := atomic.AddInt64(&s.stats.ActiveConns, 1)
-				if active > 8000 && !s.pipeline.isTrustedProxy(ip) {
+				if active > 25000 {
 					atomic.AddInt64(&s.stats.ActiveConns, -1)
 					conn.Close()
 					return
@@ -255,6 +255,7 @@ func (s *Shield) Start() error {
 
 				// CPS Protection
 				if !s.pipeline.CheckConnRate(ip) {
+					atomic.AddInt64(&s.stats.ActiveConns, -1)
 					s.pipeline.banIP(ip, s.cfg.Protection.Ban.Duration)
 					conn.Close()
 					return
@@ -263,9 +264,10 @@ func (s *Shield) Start() error {
 				// Concurrent Connection Limit
 				count := s.pipeline.IncrementConnCount(ip)
 				if count > s.cfg.Protection.ConnectionLimit.MaxPerIP {
-					// Ban immediately at the connection level
+					atomic.AddInt64(&s.stats.ActiveConns, -1)
 					s.pipeline.banIP(ip, s.cfg.Protection.Ban.Duration)
 					conn.Close()
+					return
 				}
 			case http.StateClosed, http.StateHijacked:
 				atomic.AddInt64(&s.stats.ActiveConns, -1)
