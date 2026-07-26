@@ -1136,12 +1136,6 @@ function drawLineChart(canvasId, data, strokeColor, maxOverride, unit) {
   }
 }
 
-// ======================== DATA STATE ========================
-var homeRps = new Array(60).fill(0);
-var cpuHist = new Array(60).fill(0);
-var lastBlocked = 0, connected = false, retryDelay = 1000;
-var prevRx = 0, prevTx = 0;
-
 // ======================== FETCH STATS ========================
 function fetchStats() {
   fetch('/api/dstat?_=' + Date.now()).then(function(r) { return r.json(); }).then(function(d) {
