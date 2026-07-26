@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -238,16 +239,41 @@ func main() {
 		}
 		w.Write(body)
 	})
-	mux.HandleFunc("/api/rps-history", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		body, err := fetchAPI("/api/rps-history")
-		if err != nil {
-			w.Write([]byte(`{"rps":[]}`))
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		w.Write(body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.Write([]byte(`{"status":"error","message":"invalid request"}`))
+			return
+		}
+		client := &http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Post("http://127.0.0.1:9090/api/login", "application/json", bytes.NewReader(body))
+		if err != nil {
+			resp, err = client.Post("http://mango-shield:9090/api/login", "application/json", bytes.NewReader(body))
+		}
+		if err != nil {
+			resp, err = client.Post("http://103.77.246.167:9090/api/login", "application/json", bytes.NewReader(body))
+		}
+		if err != nil || resp == nil {
+			w.Write([]byte(`{"status":"error","message":"Admin authentication API unreachable"}`))
+			return
+		}
+		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		for k, v := range resp.Header {
+			if k == "Set-Cookie" {
+				for _, val := range v {
+					w.Header().Add(k, val)
+				}
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		w.Write(respBody)
 	})
 
 	fmt.Println("Mango Test Site listening on :8080")
@@ -747,7 +773,7 @@ body {
     </div>
     <div class="modal-body">
       <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
-        Authenticate with administrator credentials (Default: <code style="color:var(--cyan)">admin</code> / <code style="color:var(--cyan)">admin123_change_in_production</code>) to unlock Management APIs, Cache Purging, WAF Rules, and Security Telemetry.
+        Authenticate with administrator credentials (Default: <code style="color:var(--cyan)">admin</code> / <code style="color:var(--cyan)">admin123</code>) to unlock Management APIs, Cache Purging, WAF Rules, and Security Telemetry.
       </p>
       <form id="adminLoginForm" onsubmit="submitAdminLogin(event)">
         <div class="form-group">
@@ -756,7 +782,7 @@ body {
         </div>
         <div class="form-group">
           <label>Password</label>
-          <input type="password" id="adminPass" value="admin123_change_in_production" required placeholder="Password">
+          <input type="password" id="adminPass" value="admin123" required placeholder="Password">
         </div>
         <div id="loginMsg" style="font-size:12px;display:none;margin-bottom:10px"></div>
         <button type="submit" class="atk-btn safe" style="width:100%;padding:10px">Authenticate Admin</button>
