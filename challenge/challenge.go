@@ -243,7 +243,7 @@ func (m *Manager) serveJSChallenge(w http.ResponseWriter, r *http.Request, diffi
 	html := fmt.Sprintf(powTemplate, r.Host, clientIP, rayID, challengeStr, difficulty, difficulty, r.URL.RequestURI())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache")
-	w.WriteHeader(http.StatusServiceUnavailable)
+	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))
 }
 
@@ -266,7 +266,7 @@ func (m *Manager) serveCAPTCHAChallenge(w http.ResponseWriter, r *http.Request) 
 	html := fmt.Sprintf(captchaTemplate, r.Host, r.URL.RequestURI(), ts, hash, clientIP, rayID)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache")
-	w.WriteHeader(http.StatusServiceUnavailable)
+	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(html))
 }
 
@@ -294,7 +294,7 @@ func (m *Manager) ServeBlockPage(w http.ResponseWriter, r *http.Request, clientI
 	w.Write([]byte(html))
 }
 
-// ServeRateLimitPage serves the commercial HTTP 429 Too Many Requests page
+// ServeRateLimitPage serves the commercial HTTP 403 Forbidden page (replaces 429 to prevent Cloudflare Error 1200)
 func (m *Manager) ServeRateLimitPage(w http.ResponseWriter, r *http.Request, clientIP string, retryAfterSeconds int) {
 	rayID := generateRayID(r)
 	if retryAfterSeconds <= 0 {
@@ -305,7 +305,7 @@ func (m *Manager) ServeRateLimitPage(w http.ResponseWriter, r *http.Request, cli
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 	w.Header().Set("X-Mango-Shield", "rate-limited")
-	w.WriteHeader(http.StatusTooManyRequests)
+	w.WriteHeader(http.StatusForbidden)
 	w.Write([]byte(html))
 }
 

@@ -809,10 +809,14 @@ func (p *Pipeline) Cleanup() {
 }
 
 func isStaticAsset(path string) bool {
+	// Whitelist all /api/ endpoints (login, admin authentication, stats, etc.) so API calls NEVER return HTML Captchas
+	if strings.HasPrefix(path, "/api/") || path == "/api" {
+		return true
+	}
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
 	case ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot":
 		return true
 	}
-	return path == "/favicon.ico" || strings.HasPrefix(path, "/api/stats") || strings.HasPrefix(path, "/api/system-stats")
+	return path == "/favicon.ico"
 }

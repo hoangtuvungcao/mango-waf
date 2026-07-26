@@ -973,7 +973,15 @@ window.submitAdminLogin = function(e) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: u, password: p })
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  }).then(function(r) {
+    return r.text().then(function(txt) {
+      try {
+        return JSON.parse(txt);
+      } catch(err) {
+        return { status: 'error', message: 'Server busy or response blocked. Please try again.' };
+      }
+    });
+  }).then(function(d) {
     if (d.status === 'ok') {
       toast('Admin authentication successful! Session active.', 'ok');
       document.getElementById('adminBtn').className = 'admin-btn logged-in';
