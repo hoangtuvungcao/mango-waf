@@ -112,36 +112,94 @@ func fetchMetrics() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	nodes := []string{
+		//"http://mango-shield:9090",
+		"http://103.77.246.167:9090",
+		"http://103.77.246.165:9090",
+	}
+
+	client := &http.Client{Timeout: 1 * time.Second}
+
 	for range ticker.C {
-		body, err := fetchAPI("/api/stats")
-		if err != nil {
-			// Do not overwrite lastJSON with incomplete map if we already have valid stats stored
-			continue
+		var aggTotal, aggBlocked, aggPassed, aggRPS, aggPeak, aggConns, aggBans int64
+		var isUnderAttack bool
+		var meshMembers []interface{}
+		var nodeCount int
+		var firstRaw map[string]interface{}
+
+		for _, node := range nodes {
+			resp, err := client.Get(node + "/api/stats")
+			if err == nil && resp.StatusCode == 200 {
+				body, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err == nil && len(body) > 0 {
+					var raw map[string]interface{}
+					if err := json.Unmarshal(body, &raw); err == nil {
+						nodeCount++
+						if firstRaw == nil {
+							firstRaw = raw
+						}
+						if t, ok := raw["total_requests"].(float64); ok {
+							aggTotal += int64(t)
+						}
+						if b, ok := raw["blocked_requests"].(float64); ok {
+							aggBlocked += int64(b)
+						}
+						if p, ok := raw["passed_requests"].(float64); ok {
+							aggPassed += int64(p)
+						}
+						if r, ok := raw["current_rps"].(float64); ok {
+							aggRPS += int64(r)
+						}
+						if pk, ok := raw["peak_rps"].(float64); ok {
+							if int64(pk) > aggPeak {
+								aggPeak = int64(pk)
+							}
+						}
+						if c, ok := raw["active_conns"].(float64); ok {
+							aggConns += int64(c)
+						}
+						if bn, ok := raw["active_bans"].(float64); ok {
+							if int64(bn) > aggBans {
+								aggBans = int64(bn)
+							}
+						}
+						if atk, ok := raw["is_under_attack"].(bool); ok && atk {
+							isUnderAttack = true
+						}
+						if m, ok := raw["mesh_members"].([]interface{}); ok && len(m) > len(meshMembers) {
+							meshMembers = m
+						}
+					}
+				}
+			} else if resp != nil {
+				resp.Body.Close()
+			}
 		}
 
-		var rawMap map[string]interface{}
-		if err := json.Unmarshal(body, &rawMap); err == nil {
-			var currPassed uint64
-			var currBlocked uint64
-
-			if p, ok := rawMap["passed_requests"].(float64); ok {
-				currPassed = uint64(p)
-			}
-			if b, ok := rawMap["blocked_requests"].(float64); ok {
-				currBlocked = uint64(b)
-			}
-
+		if firstRaw != nil {
 			copy(histPassed[0:59], histPassed[1:60])
 			copy(histBlocked[0:59], histBlocked[1:60])
+			histPassed[59] = uint64(aggPassed)
+			histBlocked[59] = uint64(aggBlocked)
 
-			histPassed[59] = currPassed
-			histBlocked[59] = currBlocked
+			firstRaw["total_requests"] = aggTotal
+			firstRaw["blocked_requests"] = aggBlocked
+			firstRaw["passed_requests"] = aggPassed
+			firstRaw["current_rps"] = aggRPS
+			firstRaw["peak_rps"] = aggPeak
+			firstRaw["active_conns"] = aggConns
+			firstRaw["active_bans"] = aggBans
+			firstRaw["is_under_attack"] = isUnderAttack
+			firstRaw["mesh_nodes"] = nodeCount
+			if len(meshMembers) > 0 {
+				firstRaw["mesh_members"] = meshMembers
+			}
+			firstRaw["hist_passed"] = histPassed
+			firstRaw["hist_blocked"] = histBlocked
+			firstRaw["status"] = "healthy"
 
-			rawMap["hist_passed"] = histPassed
-			rawMap["hist_blocked"] = histBlocked
-			rawMap["status"] = "healthy"
-
-			data, _ := json.Marshal(rawMap)
+			data, _ := json.Marshal(firstRaw)
 			lastJSON.Store(data)
 		}
 	}
@@ -891,9 +949,6 @@ body {
 <footer class="footer">Mango Shield v2.0 -- Enterprise L7 DDoS Protection and WAF Engine -- Built with Go and eBPF</footer>
 
 <script>
-(function() {
-'use strict';
-
 // ======================== DATA STATE ========================
 var homeRps = new Array(60).fill(0);
 var cpuHist = new Array(60).fill(0);
@@ -1367,8 +1422,6 @@ window.addEventListener('resize', function() {
   drawLineChart('homeChart', homeRps, 'rgb(6,182,212)');
   drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100);
 });
-
-})();
-<\/script>
+</script>
 </body>
 </html>`
