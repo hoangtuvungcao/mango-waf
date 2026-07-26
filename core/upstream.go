@@ -112,6 +112,13 @@ func (um *UpstreamManager) GetNext(host string) (string, error) {
 		}
 	}
 
+	// FALLBACK: If health checker marked backends un-alive during startup, fallback to configured upstream
+	if len(pool.Backends) > 0 {
+		backend := pool.Backends[startIdx%len(pool.Backends)]
+		pool.Current = (startIdx + 1) % len(pool.Backends)
+		return backend.URL, nil
+	}
+
 	return "", errors.New("no upstream is alive")
 }
 

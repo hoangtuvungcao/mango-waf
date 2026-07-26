@@ -105,18 +105,13 @@ tls:
 domains:
   - name: "firewall.hidev.dev"
     upstreams:
-      # Purpose: Upstream target backend application URL.
-      # Valid Values: HTTP/HTTPS URL ("http://127.0.0.1:8080", "http://127.0.0.1:8080")
-      # Recommended Production Value: "http://127.0.0.1:8080"
-      # Performance Impact: Direct internal Docker network routing.
-      # Security Impact: Upstream application is shielded behind WAF reverse proxy.
-      - url: "http://127.0.0.1:8080"
+      - url: "http://mango-test-site:8080"
         weight: 1
     ssl: true
 
   - name: "localhost"
     upstreams:
-      - url: "http://127.0.0.1:8080"
+      - url: "http://mango-test-site:8080"
         weight: 1
     ssl: false
 

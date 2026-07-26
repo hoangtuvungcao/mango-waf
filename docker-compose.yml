@@ -16,7 +16,7 @@ services:
       - "9100:9100"
     volumes:
       - ./config:/app/config:ro
-      - ./certs:/app/certs:ro
+      - ./certs:/app/certs
       - ./data:/app/data
       - /sys/fs/bpf:/sys/fs/bpf
     environment:
@@ -56,12 +56,17 @@ services:
         ENTRYPOINT ["/app/test-site"]
     container_name: mango-test-site
     restart: unless-stopped
+    ports:
+      - "8080:8080"
     networks:
-      - shield-net
+      shield-net:
+        aliases:
+          - test-site
+          - mango-test-site
     environment:
       - TZ=Asia/Ho_Chi_Minh
       - MANGO_DOMAIN=firewall.hidev.dev
-      - MANGO_API_URL=http://127.0.0.1:9090
+      - MANGO_API_URL=http://mango-shield:9090
 
 networks:
   shield-net:

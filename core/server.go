@@ -183,7 +183,7 @@ func (s *Shield) Start() error {
 		if keyFile == "" {
 			keyFile = "certs/server.key"
 		}
-		if err := ensureTLSCertificates(certFile, keyFile); err != nil {
+		if err := ensureTLSCertificates(s.cfg, certFile, keyFile); err != nil {
 			logger.Warn("Failed to ensure TLS certificates", "error", err)
 		}
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
@@ -670,7 +670,7 @@ func printBanner(cfg *config.Config) {
 	fmt.Printf("\033[32m  TLS: %v | Dashboard: %v\033[0m\n\n", cfg.TLS.Enabled, cfg.Dashboard.Enabled)
 }
 
-func ensureTLSCertificates(certFile, keyFile string) error {
+func ensureTLSCertificates(cfg *config.Config, certFile, keyFile string) error {
 	if certFile == "" {
 		certFile = "certs/server.crt"
 	}
@@ -702,19 +702,61 @@ func ensureTLSCertificates(certFile, keyFile string) error {
 		return fmt.Errorf("generate serial number: %w", err)
 	}
 
+	// Dynamic CommonName & Subject Alternative Names (DNSNames) from configured domains
+	commonName := "localhost"
+	dnsMap := map[string]bool{"localhost": true}
+
+	if cfg != nil {
+		for i, d := range cfg.Domains {
+			if d.Name != "" {
+				if i == 0 {
+					commonName = d.Name
+				}
+				dnsMap[d.Name] = true
+			}
+		}
+	}
+
+	var dnsNames []string
+	for name := range dnsMap {
+		dnsNames = append(dnsNames, name)
+	}
+
+	// Dynamic IPAddresses from loopback + server listen settings
+	ipMap := map[string]net.IP{
+		"127.0.0.1": net.ParseIP("127.0.0.1"),
+		"::1":       net.ParseIP("::1"),
+	}
+	if cfg != nil {
+		for _, addr := range []string{cfg.Server.Listen, cfg.Server.HTTPListen} {
+			if host, _, err := net.SplitHostPort(addr); err == nil && host != "" && host != "0.0.0.0" && host != "::" {
+				if parsed := net.ParseIP(host); parsed != nil {
+					ipMap[parsed.String()] = parsed
+				}
+			}
+		}
+	}
+
+	var ipAddresses []net.IP
+	for _, ip := range ipMap {
+		if ip != nil {
+			ipAddresses = append(ipAddresses, ip)
+		}
+	}
+
 	template := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			Organization: []string{"Mango Shield WAF"},
-			CommonName:   "firewall.hidev.dev",
+			CommonName:   commonName,
 		},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("103.77.246.198")},
-		DNSNames:              []string{"firewall.hidev.dev", "localhost"},
+		IPAddresses:           ipAddresses,
+		DNSNames:              dnsNames,
 	}
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
@@ -741,6 +783,6 @@ func ensureTLSCertificates(certFile, keyFile string) error {
 		return fmt.Errorf("encode key: %w", err)
 	}
 
-	logger.Info("Self-signed TLS certificates generated successfully", "cert", certFile, "key", keyFile)
+	logger.Info("Self-signed TLS certificates generated successfully", "cert", certFile, "key", keyFile, "cn", commonName, "dns", dnsNames)
 	return nil
 }
