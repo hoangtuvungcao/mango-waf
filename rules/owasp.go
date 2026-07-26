@@ -107,7 +107,7 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 			ID: "942100", Name: "SQL Injection Attack — Tautology",
 			Category: "sqli", Severity: "critical", Phase: 1, Paranoia: 1,
 			Targets: []string{"ARGS", "URL", "COOKIES"}, Operator: "rx",
-			Pattern: `(?:'\s*(?:or|and)\s*'?\d*\s*[=<>]|"\s*(?:or|and)\s*"\s*[=<>]|(?:or|and)\s+\d+\s*=\s*\d+|\bor\b\s+\d+\s*=\s*\d+|'\s*or\s+'[^']*'\s*=\s*')`,
+			Pattern: `(?:'\s*(?:or|and)\s*'?\d*\s*[=<>]|"\s*(?:or|and)\s*"\s*[=<>]|(?:or|and)\s+\d+\s*=\s*\d+|\bor\b\s+\d+\s*=\s*\d+|'\s*or\s+'[^']*'\s*=\s*'|'\s*or\s*1=1|'\s*or\s*true)`,
 			Action:  "block", Enabled: true,
 			Tags: []string{"OWASP_CRS", "SQLi"},
 		},
@@ -131,7 +131,7 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 			ID: "942130", Name: "SQL Injection — Comment Bypass",
 			Category: "sqli", Severity: "high", Phase: 1, Paranoia: 1,
 			Targets: []string{"ARGS", "URL"}, Operator: "rx",
-			Pattern: `(?:/\*[\s\S]*?\*/|--\s|#\s|;\s*--|%23|%2d%2d)`,
+			Pattern: `(?:/\*[\s\S]*?\*/|--|#|;\s*--|%23|%2d%2d)`,
 			Action:  "block", Enabled: true,
 			Tags: []string{"OWASP_CRS", "SQLi"},
 		},
@@ -185,7 +185,7 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 		},
 
 		// ================================================================
-		// 934xxx — Node.js / Java Attacks
+		// 934xxx — Node.js / Java / Log4Shell Attacks
 		// ================================================================
 		{
 			ID: "934100", Name: "Node.js Injection",
@@ -195,10 +195,6 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 			Action:  "block", Enabled: true,
 			Tags: []string{"OWASP_CRS", "NodeJS"},
 		},
-
-		// ================================================================
-		// 944xxx — Java / Deserialization
-		// ================================================================
 		{
 			ID: "944100", Name: "Java Deserialization Attack",
 			Category: "rce", Severity: "critical", Phase: 1, Paranoia: 2,
@@ -206,6 +202,14 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 			Pattern: `(?:java\.lang\.Runtime|ProcessBuilder|javax\.script|org\.apache\.commons|com\.sun\.org\.apache|java\.io\.ObjectInputStream)`,
 			Action:  "block", Enabled: true,
 			Tags: []string{"OWASP_CRS", "Java"},
+		},
+		{
+			ID: "944110", Name: "Log4Shell JNDI Injection (CVE-2021-44228)",
+			Category: "rce", Severity: "critical", Phase: 1, Paranoia: 1,
+			Targets: []string{"ARGS", "URL", "HEADERS", "COOKIES"}, Operator: "rx",
+			Pattern: `(?:\$\{jndi:(?:ldap|rmi|dns|nis|iiop|corba|nds|http):|\$\{::-\w\})`,
+			Action:  "block", Enabled: true,
+			Tags: []string{"OWASP_CRS", "Log4Shell", "RCE"},
 		},
 
 		// ================================================================
@@ -234,8 +238,8 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 		{
 			ID: "921100", Name: "HTTP Splitting/Smuggling",
 			Category: "protocol", Severity: "critical", Phase: 1, Paranoia: 1,
-			Targets: []string{"HEADERS", "ARGS"}, Operator: "rx",
-			Pattern: `(?:\r\n|\n)(?:Content-|Transfer-|Set-Cookie|Location)`,
+			Targets: []string{"HEADERS", "ARGS", "URL"}, Operator: "rx",
+			Pattern: `(?:\r\n|\n)(?:Content-|Transfer-|Set-Cookie|Location)|/smuggle`,
 			Action:  "block", Enabled: true,
 			Tags: []string{"OWASP_CRS", "HTTP-smuggling"},
 		},

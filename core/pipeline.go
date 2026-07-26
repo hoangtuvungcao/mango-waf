@@ -111,7 +111,22 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 		return Action{Type: ActionDrop, Reason: "banned"}
 	}
 
-	// Layer 0.1: Verified proof cookie (Human user bypass)
+	// Layer 0.05: WAF Rules Deep Inspection (ALWAYS inspect all requests for attack signatures!)
+	if p.wafEngine != nil && p.cfg.WAF.Enabled {
+		if p.degrader == nil || !p.degrader.IsFeatureDisabled("waf_deep_inspect", p.shield.stats.CurrentRPS) {
+			wafResult := p.wafEngine.Inspect(r)
+			if wafResult.Blocked {
+				logger.Warn("WAF blocked malicious request", "ip", ip, "rule", wafResult.TopRule, "score", wafResult.Score, "uri", r.RequestURI)
+				if wafResult.Action == "drop" {
+					p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
+					return Action{Type: ActionDrop, Reason: "waf:" + wafResult.TopRule}
+				}
+				return Action{Type: ActionBlock, Reason: "waf:" + wafResult.TopRule}
+			}
+		}
+	}
+
+	// Layer 0.1: Verified proof cookie (Human user bypass for anti-DDoS rate limits & challenges)
 	if p.hasValidProof(r) {
 		return Action{Type: ActionAllow, Reason: "verified_human"}
 	}
