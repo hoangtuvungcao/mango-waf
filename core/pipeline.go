@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -108,6 +109,16 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 	// Layer 0: Check banned
 	if p.isBanned(ip) {
 		return Action{Type: ActionDrop, Reason: "banned"}
+	}
+
+	// Layer 0.1: Verified proof cookie (Human user bypass)
+	if p.hasValidProof(r) {
+		return Action{Type: ActionAllow, Reason: "verified_human"}
+	}
+
+	// Layer 0.2: Static assets & stats endpoints bypass
+	if isStaticAsset(r.URL.Path) {
+		return Action{Type: ActionAllow, Reason: "static_asset"}
 	}
 
 	// Layer 0.5: Emergency mode
@@ -787,6 +798,7 @@ func (p *Pipeline) Cleanup() {
 		}
 		return true
 	})
+
 	p.ipStates.Range(func(key, value interface{}) bool {
 		state := value.(*IPState)
 		if now.Sub(state.LastSeen) > 10*time.Minute {
@@ -794,4 +806,13 @@ func (p *Pipeline) Cleanup() {
 		}
 		return true
 	})
+}
+
+func isStaticAsset(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".eot":
+		return true
+	}
+	return path == "/favicon.ico" || strings.HasPrefix(path, "/api/stats") || strings.HasPrefix(path, "/api/system-stats")
 }
