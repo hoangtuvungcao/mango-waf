@@ -909,27 +909,27 @@ window.submitAdminLogin = function(e) {
 };
 
 // ======================== TAB NAVIGATION ========================
-var tabs = document.querySelectorAll('.nav-tab');
-var pages = document.querySelectorAll('.page');
-tabs.forEach(function(t) {
-  t.addEventListener('click', function() {
-    tabs.forEach(function(x) { x.classList.remove('active'); });
-    pages.forEach(function(x) { x.classList.remove('active'); });
-    t.classList.add('active');
-    var tabName = t.dataset.tab;
-    var p = document.getElementById('page-' + tabName);
-    if (p) p.classList.add('active');
+document.addEventListener('click', function(e) {
+  var t = e.target.closest('.nav-tab');
+  if (!t) return;
+  var tabName = t.getAttribute('data-tab');
+  if (!tabName) return;
 
-    // Force immediate canvas chart redraw when tab becomes visible
-    setTimeout(function() {
-      if (tabName === 'home') drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
-      if (tabName === 'dstat') drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
-      if (tabName === 'dashboard' || tabName === 'stats') {
-        fetchStats();
-        fetchSystemStats();
-      }
-    }, 40);
-  });
+  document.querySelectorAll('.nav-tab').forEach(function(x) { x.classList.remove('active'); });
+  document.querySelectorAll('.page').forEach(function(x) { x.classList.remove('active'); });
+
+  t.classList.add('active');
+  var p = document.getElementById('page-' + tabName);
+  if (p) p.classList.add('active');
+
+  setTimeout(function() {
+    if (tabName === 'home') drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
+    if (tabName === 'dstat') drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
+    if (tabName === 'dashboard' || tabName === 'stats') {
+      fetchStats();
+      fetchSystemStats();
+    }
+  }, 40);
 });
 
 // ======================== FORMATTERS ========================

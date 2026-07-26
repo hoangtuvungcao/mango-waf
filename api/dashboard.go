@@ -1024,12 +1024,14 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 
 function fmt(n) {
+  if (n === undefined || n === null || isNaN(n)) return '0';
   if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   return n.toString();
 }
 function fmtTime(s) {
+  if (!s || isNaN(s)) return '0s';
   var h = Math.floor(s / 3600), m = Math.floor((s %% 3600) / 60);
   return h > 0 ? h + 'h ' + m + 'm' : m > 0 ? m + 'm' : Math.floor(s) + 's';
 }
@@ -1093,7 +1095,7 @@ function updateStats() {
     document.getElementById('passed').textContent = fmt(d.passed_requests);
     document.getElementById('peak').textContent = fmt(d.peak_rps);
     document.getElementById('conns').textContent = fmt(d.active_conns);
-    document.getElementById('banned').textContent = fmt(d.banned_ips);
+    document.getElementById('banned').textContent = fmt(d.active_bans || d.banned_ips || 0);
     document.getElementById('xdp_drops').textContent = fmt(d.xdp_dropped_pkts);
     document.getElementById('up').textContent = fmtTime(d.uptime_seconds);
 
