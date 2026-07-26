@@ -158,15 +158,16 @@ func main() {
 		w.Header().Set("Expires", "0")
 		fmt.Fprint(w, htmlPage)
 	})
-	mux.HandleFunc("/api/dstat", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-		if cached, ok := lastJSON.Load().([]byte); ok && len(cached) > 0 {
-			w.Write(cached)
-		} else {
+		body, err := fetchAPI("/api/stats")
+		if err != nil {
 			w.Write([]byte(`{"status":"waiting"}`))
+			return
 		}
+		w.Write(body)
 	})
 	mux.HandleFunc("/api/system-stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -1138,7 +1139,7 @@ function drawLineChart(canvasId, data, strokeColor, maxOverride, unit) {
 
 // ======================== FETCH STATS ========================
 function fetchStats() {
-  fetch('/api/dstat?_=' + Date.now()).then(function(r) { return r.json(); }).then(function(d) {
+  fetch('/api/stats?_=' + Date.now()).then(function(r) { return r.json(); }).then(function(d) {
     connected = true; retryDelay = 1000;
     document.getElementById('connDot').className = 'conn-dot on';
     document.getElementById('connText').textContent = 'Connected';
@@ -1285,7 +1286,7 @@ function fetchSystemStats() {
     drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
 
     // Stats chart (passed vs blocked)
-    fetch('/api/dstat?_=' + Date.now()).then(function(r){return r.json()}).then(function(sd) {
+    fetch('/api/stats?_=' + Date.now()).then(function(r){return r.json()}).then(function(sd) {
       if (sd.hist_passed && sd.hist_blocked) {
         drawLineChart('statsChart', sd.hist_passed, 'rgb(16,185,129)', null, 'req');
       }
