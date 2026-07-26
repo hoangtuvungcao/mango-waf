@@ -775,7 +775,7 @@ cluster:
   # Recommended Production Value: "mango-node-primary"
   # Performance Impact: None
   # Security Impact: Identifies node origin in mesh logs.
-  node_name: "mango-node-primary"
+  node_name: "mango-node-1"
 
   # Purpose: UDP/TCP port for P2P mesh cluster communication.
   # Valid Values: 1024 to 65535 (default 7946)
