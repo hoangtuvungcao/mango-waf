@@ -153,7 +153,9 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		w.Header().Set("Pragma", "no-cache")
+		w.Header().Set("Expires", "0")
 		fmt.Fprint(w, htmlPage)
 	})
 	mux.HandleFunc("/api/dstat", func(w http.ResponseWriter, r *http.Request) {
@@ -709,12 +711,12 @@ body {
 <!-- ============== HOME ============== -->
 <section class="page active" id="page-home">
   <div class="stat-grid">
-    <div class="stat-card c-cyan"><div class="stat-label">Current RPS</div><div class="stat-val" id="h_rps">--</div><div class="stat-sub">requests / second</div></div>
-    <div class="stat-card"><div class="stat-label">Total Requests</div><div class="stat-val" id="h_total">--</div><div class="stat-sub">inspected traffic</div></div>
-    <div class="stat-card c-red"><div class="stat-label">Blocked</div><div class="stat-val" id="h_blocked">--</div><div class="stat-sub">threats mitigated</div></div>
-    <div class="stat-card c-green"><div class="stat-label">Passed</div><div class="stat-val" id="h_passed">--</div><div class="stat-sub">clean traffic</div></div>
-    <div class="stat-card c-amber"><div class="stat-label">Peak RPS</div><div class="stat-val" id="h_peak">--</div><div class="stat-sub">highest throughput</div></div>
-    <div class="stat-card c-purple"><div class="stat-label">Active Bans</div><div class="stat-val" id="h_bans">--</div><div class="stat-sub">IP blacklists</div></div>
+    <div class="stat-card c-cyan"><div class="stat-label">Current RPS</div><div class="stat-val" id="h_rps">0</div><div class="stat-sub">requests / second</div></div>
+    <div class="stat-card"><div class="stat-label">Total Requests</div><div class="stat-val" id="h_total">0</div><div class="stat-sub">inspected traffic</div></div>
+    <div class="stat-card c-red"><div class="stat-label">Blocked</div><div class="stat-val" id="h_blocked">0</div><div class="stat-sub">threats mitigated</div></div>
+    <div class="stat-card c-green"><div class="stat-label">Passed</div><div class="stat-val" id="h_passed">0</div><div class="stat-sub">clean traffic</div></div>
+    <div class="stat-card c-amber"><div class="stat-label">Peak RPS</div><div class="stat-val" id="h_peak">0</div><div class="stat-sub">highest throughput</div></div>
+    <div class="stat-card c-purple"><div class="stat-label">Active Bans</div><div class="stat-val" id="h_bans">0</div><div class="stat-sub">IP blacklists</div></div>
   </div>
 
   <div class="card mb-24">
@@ -727,7 +729,7 @@ body {
       <div class="card-title">System Health</div>
       <div class="prog-row"><div class="prog-header"><span>WAF Block Rate</span><span id="h_brate">0%</span></div><div class="prog-track"><div class="prog-bar green" id="h_bbar" style="width:0%"></div></div></div>
       <div class="prog-row"><div class="prog-header"><span>Connection Load</span><span id="h_cload">0%</span></div><div class="prog-track"><div class="prog-bar cyan" id="h_cbar" style="width:0%"></div></div></div>
-      <div class="prog-row"><div class="prog-header"><span>Uptime</span><span id="h_uptime" style="font-family:var(--mono);color:var(--cyan)">--</span></div></div>
+      <div class="prog-row"><div class="prog-header"><span>Uptime</span><span id="h_uptime" style="font-family:var(--mono);color:var(--cyan)">Active</span></div></div>
       <div class="prog-row"><div class="prog-header"><span>Connection</span><span><span class="conn-indicator"><span class="conn-dot on" id="connDot"></span><span id="connText">Connected</span></span></span></div></div>
     </div>
     <div class="card">
@@ -740,14 +742,14 @@ body {
 <!-- ============== DASHBOARD ============== -->
 <section class="page" id="page-dashboard">
   <div class="stat-grid">
-    <div class="stat-card c-cyan"><div class="stat-label">Current RPS</div><div class="stat-val" id="d_rps">--</div></div>
-    <div class="stat-card"><div class="stat-label">Total</div><div class="stat-val" id="d_total">--</div></div>
-    <div class="stat-card c-red"><div class="stat-label">Blocked</div><div class="stat-val" id="d_blocked">--</div></div>
-    <div class="stat-card c-green"><div class="stat-label">Passed</div><div class="stat-val" id="d_passed">--</div></div>
-    <div class="stat-card c-amber"><div class="stat-label">Peak RPS</div><div class="stat-val" id="d_peak">--</div></div>
-    <div class="stat-card"><div class="stat-label">Connections</div><div class="stat-val" id="d_conns">--</div></div>
-    <div class="stat-card c-red"><div class="stat-label">Banned IPs</div><div class="stat-val" id="d_bans">--</div></div>
-    <div class="stat-card c-purple"><div class="stat-label">XDP Drops</div><div class="stat-val" id="d_xdp">--</div></div>
+    <div class="stat-card c-cyan"><div class="stat-label">Current RPS</div><div class="stat-val" id="d_rps">0</div></div>
+    <div class="stat-card"><div class="stat-label">Total</div><div class="stat-val" id="d_total">0</div></div>
+    <div class="stat-card c-red"><div class="stat-label">Blocked</div><div class="stat-val" id="d_blocked">0</div></div>
+    <div class="stat-card c-green"><div class="stat-label">Passed</div><div class="stat-val" id="d_passed">0</div></div>
+    <div class="stat-card c-amber"><div class="stat-label">Peak RPS</div><div class="stat-val" id="d_peak">0</div></div>
+    <div class="stat-card"><div class="stat-label">Connections</div><div class="stat-val" id="d_conns">0</div></div>
+    <div class="stat-card c-red"><div class="stat-label">Banned IPs</div><div class="stat-val" id="d_bans">0</div></div>
+    <div class="stat-card c-purple"><div class="stat-label">XDP Drops</div><div class="stat-val" id="d_xdp">0</div></div>
   </div>
 
   <div class="card mb-24">
@@ -931,17 +933,23 @@ window.submitAdminLogin = function(e) {
 window.switchTab = function(tabName) {
   if (!tabName) return;
   var tabs = document.querySelectorAll('.nav-tab');
-  tabs.forEach(function(x) {
-    var dt = x.getAttribute('data-tab');
-    if (dt === tabName) x.classList.add('active');
-    else x.classList.remove('active');
-  });
+  for (var i = 0; i < tabs.length; i++) {
+    var dt = tabs[i].getAttribute('data-tab');
+    if (dt === tabName) {
+      tabs[i].className = 'nav-tab active';
+    } else {
+      tabs[i].className = 'nav-tab';
+    }
+  }
 
   var pages = document.querySelectorAll('.page');
-  pages.forEach(function(x) {
-    if (x.id === 'page-' + tabName) x.classList.add('active');
-    else x.classList.remove('active');
-  });
+  for (var j = 0; j < pages.length; j++) {
+    if (pages[j].id === 'page-' + tabName) {
+      pages[j].className = 'page active';
+    } else {
+      pages[j].className = 'page';
+    }
+  }
 
   try {
     if (tabName === 'home') drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
@@ -1033,9 +1041,15 @@ function drawLineChart(canvasId, data, color, maxOverride, unit) {
   var drawW = Math.max(10, pW - paddingLeft - paddingRight);
   var drawH = Math.max(10, pH - paddingTop - paddingBottom);
 
-  var maxVal = Math.max.apply(null, data);
+  var maxVal = 0;
+  for (var dv = 0; dv < data.length; dv++) {
+    var vNum = Number(data[dv]);
+    if (!isNaN(vNum) && isFinite(vNum) && vNum > maxVal) {
+      maxVal = vNum;
+    }
+  }
   var maxY = maxOverride || (maxVal > 0 ? Math.ceil(maxVal * 1.25) : 10);
-  if (maxY < 5) maxY = 5;
+  if (!isFinite(maxY) || isNaN(maxY) || maxY < 5) maxY = 5;
 
   // Grid & Y-Axis Numerical Labels
   ctx.strokeStyle = 'rgba(51,65,85,0.35)';
