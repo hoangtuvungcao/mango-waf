@@ -457,14 +457,15 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		if !s.pipeline.isTrustedProxy(ip) {
 			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration*2)
 		}
-		// Silently close connection
-		hj, ok := w.(http.Hijacker)
-		if ok {
-			conn, _, _ := hj.Hijack()
-			if conn != nil {
-				conn.Close()
-			}
-		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-Mango-Shield", "dropped")
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(fmt.Sprintf(
+			"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
+				"<h1>403 Forbidden</h1><p>Access dropped by Mango Shield eBPF protection system.</p>"+
+				"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
+			action.Reason, ip,
+		)))
 	}
 }
 

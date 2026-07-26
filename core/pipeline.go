@@ -765,24 +765,19 @@ func (p *Pipeline) banIP(ip string, duration time.Duration) {
 	}
 	logger.Info("IP banned", "ip", ip, "duration", duration)
 
-	// 1. Unbeatable Hardware-level Drop (XDP / eBPF)
-	if p.xdpMgr != nil && p.xdpMgr.Enabled {
+	// 1. Unbeatable Hardware-level Drop (XDP / eBPF) - Only for direct non-proxy IPs
+	if p.xdpMgr != nil && p.xdpMgr.Enabled && !p.isTrustedProxy(ip) {
 		if err := p.xdpMgr.BanIP(ip); err != nil {
 			logger.Warn("XDP Map insertion failed", "ip", ip, "err", err)
 		}
 	}
 
-	if p.cfg.Protection.Ban.UseIptables {
-		// Kernel-level blocking using ipset (fastest way for Linux)
-		// ipset add mango_bans <ip> timeout <seconds>
-		// We use timeout flag so ipset automatically cleans up old bans
+	if p.cfg.Protection.Ban.UseIptables && !p.isTrustedProxy(ip) {
 		timeoutSec := int(duration.Seconds())
 		go func() {
 			cmd := exec.Command("ipset", "add", "mango_bans", ip, "timeout", fmt.Sprintf("%d", timeoutSec), "-exist")
 			if err := cmd.Run(); err != nil {
-				logger.Error("IPSet ban failed", "ip", ip, "error", err)
-				// Fallback to simple iptables if ipset fails
-				exec.Command("iptables", "-I", "INPUT", "-s", ip, "-j", "DROP").Run()
+				logger.Debug("IPSet ban skipped or failed", "ip", ip, "error", err)
 			}
 		}()
 	}
