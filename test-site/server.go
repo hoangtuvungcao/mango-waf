@@ -43,14 +43,13 @@ func getEnv(key, fallback string) string {
 func init() {
 	var initial []byte
 	lastJSON.Store(initial)
-	apiBaseURL = getEnv("MANGO_API_URL", "http://mango-shield:9090")
+	apiBaseURL = getEnv("MANGO_API_URL", "http://127.0.0.1:9090")
 }
 
 func fetchAPI(path string) ([]byte, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	candidates := []string{
 		apiBaseURL + path,
-		"http://mango-shield:9090" + path,
 		"http://127.0.0.1:9090" + path,
 		"http://localhost:9090" + path,
 	}
@@ -548,15 +547,54 @@ body {
   .chart-wrap canvas { height: 160px !important; }
   .attack-grid { grid-template-columns: 1fr; }
 }
-@media (max-width: 480px) {
-  .stat-grid { grid-template-columns: 1fr; }
-  .stat-card { padding: 12px 14px; }
-  .stat-val { font-size: 20px; }
-  .nav-tab { font-size: 12px; padding: 6px 10px; }
-  .grid-4 { grid-template-columns: 1fr; }
-  .atk-item { flex-direction: column; align-items: stretch; text-align: center; }
-  .atk-btn { width: 100%; text-align: center; }
+.admin-btn {
+  background: rgba(6, 182, 212, 0.12);
+  border: 1px solid rgba(6, 182, 212, 0.3);
+  color: var(--cyan);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s;
+  flex-shrink: 0;
 }
+.admin-btn:hover { background: rgba(6, 182, 212, 0.25); color: #fff; }
+.admin-btn.logged-in { background: rgba(16, 185, 129, 0.15); border-color: rgba(16, 185, 129, 0.4); color: var(--primary); }
+
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(2, 6, 23, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 1000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.modal-overlay.active { display: flex; animation: fadeIn 0.2s ease-out; }
+.modal-card {
+  background: var(--bg-card-solid);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  max-width: 440px;
+  width: 100%;
+  padding: 24px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+}
+.modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.modal-title { font-size: 16px; font-weight: 700; color: var(--text); }
+.modal-close { background: none; border: none; color: var(--text-muted); font-size: 24px; cursor: pointer; line-height: 1; }
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 6px; font-weight: 500; }
+.form-group input { width: 100%; background: #020617; border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; color: var(--text); font-family: var(--sans); font-size: 13px; outline: none; }
+.form-group input:focus { border-color: var(--cyan); }
 </style>
 </head>
 <body>
@@ -580,12 +618,44 @@ body {
       <button class="nav-tab" data-tab="logs">Logs</button>
       <button class="nav-tab" data-tab="settings">Settings</button>
     </div>
-    <div class="nav-status ok" id="navStatus">
-      <div class="status-dot"></div>
-      <span id="navStatusText">OPERATIONAL</span>
+    <div style="display:flex;align-items:center;gap:12px">
+      <button class="admin-btn" id="adminBtn" onclick="toggleAdminModal()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a5 5 0 0 0-5 5v3H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-1V7a5 5 0 0 0-5-5zm-3 5a3 3 0 0 1 6 0v3H9V7z"/></svg>
+        <span id="adminBtnText">Admin Login</span>
+      </button>
+      <div class="nav-status ok" id="navStatus">
+        <div class="status-dot"></div>
+        <span id="navStatusText">OPERATIONAL</span>
+      </div>
     </div>
   </div>
 </nav>
+
+<div class="modal-overlay" id="adminModal">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div class="modal-title">Mango Shield Admin Authentication</div>
+      <button class="modal-close" onclick="toggleAdminModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px">
+        Authenticate with administrator credentials (Default: <code style="color:var(--cyan)">admin</code> / <code style="color:var(--cyan)">admin123_change_in_production</code>) to unlock Management APIs, Cache Purging, WAF Rules, and Security Telemetry.
+      </p>
+      <form id="adminLoginForm" onsubmit="submitAdminLogin(event)">
+        <div class="form-group">
+          <label>Username</label>
+          <input type="text" id="adminUser" value="admin" required placeholder="admin">
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="adminPass" value="admin123_change_in_production" required placeholder="Password">
+        </div>
+        <div id="loginMsg" style="font-size:12px;display:none;margin-bottom:10px"></div>
+        <button type="submit" class="atk-btn safe" style="width:100%;padding:10px">Authenticate Admin</button>
+      </form>
+    </div>
+  </div>
+</div>
 
 <main class="main-content">
 
@@ -774,6 +844,41 @@ body {
 (function() {
 'use strict';
 
+// ======================== ADMIN MODAL & AUTH ========================
+window.toggleAdminModal = function() {
+  var modal = document.getElementById('adminModal');
+  if (modal) modal.classList.toggle('active');
+};
+
+window.submitAdminLogin = function(e) {
+  e.preventDefault();
+  var u = document.getElementById('adminUser').value;
+  var p = document.getElementById('adminPass').value;
+  var msgEl = document.getElementById('loginMsg');
+  msgEl.style.display = 'none';
+
+  fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: u, password: p })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.status === 'ok') {
+      toast('Admin authentication successful! Session active.', 'ok');
+      document.getElementById('adminBtn').className = 'admin-btn logged-in';
+      document.getElementById('adminBtnText').textContent = 'Admin: ' + u;
+      window.toggleAdminModal();
+    } else {
+      msgEl.textContent = d.message || 'Invalid credentials';
+      msgEl.style.color = 'var(--red)';
+      msgEl.style.display = 'block';
+    }
+  }).catch(function(err) {
+    msgEl.textContent = 'Connection error: ' + err.message;
+    msgEl.style.color = 'var(--red)';
+    msgEl.style.display = 'block';
+  });
+};
+
 // ======================== TAB NAVIGATION ========================
 var tabs = document.querySelectorAll('.nav-tab');
 var pages = document.querySelectorAll('.page');
@@ -782,8 +887,19 @@ tabs.forEach(function(t) {
     tabs.forEach(function(x) { x.classList.remove('active'); });
     pages.forEach(function(x) { x.classList.remove('active'); });
     t.classList.add('active');
-    var p = document.getElementById('page-' + t.dataset.tab);
+    var tabName = t.dataset.tab;
+    var p = document.getElementById('page-' + tabName);
     if (p) p.classList.add('active');
+
+    // Force immediate canvas chart redraw when tab becomes visible
+    setTimeout(function() {
+      if (tabName === 'home') drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
+      if (tabName === 'dstat') drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
+      if (tabName === 'dashboard' || tabName === 'stats') {
+        fetchStats();
+        fetchSystemStats();
+      }
+    }, 40);
   });
 });
 
@@ -838,45 +954,96 @@ function renderLogs(arr, elId) {
 }
 
 // ======================== CANVAS CHART ========================
-function drawLineChart(canvasId, data, color, maxOverride) {
+function drawLineChart(canvasId, data, color, maxOverride, unit) {
   var c = document.getElementById(canvasId);
-  if (!c) return;
+  if (!c || !c.parentElement) return;
   var ctx = c.getContext('2d');
-  var w = c.parentElement.clientWidth;
-  var h = parseInt(getComputedStyle(c).height) || 200;
-  c.width = w; c.height = h;
-  ctx.clearRect(0, 0, w, h);
+  var pW = c.parentElement.clientWidth || 600;
+  var pH = parseInt(getComputedStyle(c).height) || 200;
+  c.width = pW; c.height = pH;
+  ctx.clearRect(0, 0, pW, pH);
 
-  var maxY = maxOverride || Math.max(10, Math.max.apply(null, data)) * 1.2;
+  if (!data || data.length === 0) return;
 
-  // Grid
-  ctx.strokeStyle = 'rgba(51,65,85,0.3)';
+  var paddingLeft = 45;
+  var paddingBottom = 22;
+  var paddingTop = 14;
+  var paddingRight = 15;
+  var drawW = Math.max(10, pW - paddingLeft - paddingRight);
+  var drawH = Math.max(10, pH - paddingTop - paddingBottom);
+
+  var maxVal = Math.max.apply(null, data);
+  var maxY = maxOverride || (maxVal > 0 ? Math.ceil(maxVal * 1.25) : 10);
+  if (maxY < 5) maxY = 5;
+
+  // Grid & Y-Axis Numerical Labels
+  ctx.strokeStyle = 'rgba(51,65,85,0.35)';
   ctx.lineWidth = 1;
-  for (var i = 0; i <= 4; i++) {
-    var y = h - (h * i / 4);
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '10px "Fira Code", monospace';
+  ctx.textAlign = 'right';
+
+  var gridSteps = 4;
+  for (var i = 0; i <= gridSteps; i++) {
+    var val = Math.round(maxY * i / gridSteps);
+    var y = paddingTop + drawH - (drawH * i / gridSteps);
+
+    // Grid line
+    ctx.beginPath();
+    ctx.moveTo(paddingLeft, y);
+    ctx.lineTo(pW - paddingRight, y);
+    ctx.stroke();
+
+    // Y-Axis Numerical Label
+    ctx.fillText(fmt(val) + (unit ? ' ' + unit : ''), paddingLeft - 8, y + 4);
   }
 
-  // Area fill
-  var grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, color.replace(')', ',0.3)').replace('rgb', 'rgba'));
-  grad.addColorStop(1, 'rgba(0,0,0,0)');
+  // X-Axis Time Labels
+  ctx.textAlign = 'center';
+  var timeLabels = ['-60s', '-45s', '-30s', '-15s', 'now'];
+  for (var j = 0; j < timeLabels.length; j++) {
+    var x = paddingLeft + (drawW * j / (timeLabels.length - 1));
+    ctx.fillText(timeLabels[j], x, pH - 4);
+  }
+
+  // Area Fill
+  var grad = ctx.createLinearGradient(0, paddingTop, 0, paddingTop + drawH);
+  var baseRgb = color.replace(')', '').replace('rgb(', '');
+  grad.addColorStop(0, 'rgba(' + baseRgb + ', 0.25)');
+  grad.addColorStop(1, 'rgba(' + baseRgb + ', 0.0)');
   ctx.fillStyle = grad;
-  ctx.beginPath(); ctx.moveTo(0, h);
-  for (var i = 0; i < data.length; i++) {
-    ctx.lineTo((i/(data.length-1))*w, h-(data[i]/maxY)*h);
-  }
-  ctx.lineTo(w, h); ctx.closePath(); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(paddingLeft, paddingTop + drawH);
 
-  // Line
+  for (var k = 0; k < data.length; k++) {
+    var kX = paddingLeft + (k / (data.length - 1)) * drawW;
+    var kY = paddingTop + drawH - (data[k] / maxY) * drawH;
+    ctx.lineTo(kX, kY);
+  }
+  ctx.lineTo(paddingLeft + drawW, paddingTop + drawH);
+  ctx.closePath();
+  ctx.fill();
+
+  // Line Stroke
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;
   ctx.beginPath();
-  for (var i = 0; i < data.length; i++) {
-    var x = (i/(data.length-1))*w, y = h-(data[i]/maxY)*h;
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  for (var m = 0; m < data.length; m++) {
+    var mX = paddingLeft + (m / (data.length - 1)) * drawW;
+    var mY = paddingTop + drawH - (data[m] / maxY) * drawH;
+    if (m === 0) ctx.moveTo(mX, mY);
+    else ctx.lineTo(mX, mY);
   }
   ctx.stroke();
+
+  // Current latest value indicator badge
+  var lastVal = data[data.length - 1] || 0;
+  var lastX = paddingLeft + drawW;
+  var lastY = paddingTop + drawH - (lastVal / maxY) * drawH;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+  ctx.fill();
 }
 
 // ======================== DATA STATE ========================
@@ -975,7 +1142,7 @@ function fetchStats() {
     setText('cfg_mesh', (d.mesh_nodes || 0) + ' node(s)');
 
     // Charts
-    drawLineChart('homeChart', homeRps, 'rgb(6,182,212)');
+    drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
 
   }).catch(function() {
     connected = false;
@@ -986,7 +1153,7 @@ function fetchStats() {
 
   // RPS history for dashboard chart
   fetch('/api/rps-history').then(function(r) { return r.json(); }).then(function(d) {
-    if (d && d.rps) drawLineChart('dashChart', d.rps, 'rgb(6,182,212)');
+    if (d && d.rps) drawLineChart('dashChart', d.rps, 'rgb(6,182,212)', null, 'RPS');
   }).catch(function(){});
 }
 
@@ -1031,12 +1198,12 @@ function fetchSystemStats() {
     }
 
     // CPU sparkline
-    drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100);
+    drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
 
     // Stats chart (passed vs blocked)
     fetch('/api/dstat').then(function(r){return r.json()}).then(function(sd) {
       if (sd.hist_passed && sd.hist_blocked) {
-        drawLineChart('statsChart', sd.hist_passed, 'rgb(16,185,129)');
+        drawLineChart('statsChart', sd.hist_passed, 'rgb(16,185,129)', null, 'req');
       }
     }).catch(function(){});
 

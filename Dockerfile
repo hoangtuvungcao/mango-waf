@@ -22,6 +22,7 @@ COPY --from=builder /app/config/default.yaml ./config/default.yaml
 COPY --from=builder /app/config/production.yaml ./config/production.yaml
 COPY --from=builder /app/rules ./rules
 COPY --from=builder /app/xdp ./xdp
+COPY --from=builder /app/certs ./certs
 
 # Create required directory structure
 RUN mkdir -p /app/logs /app/certs /app/data /sys/fs/bpf

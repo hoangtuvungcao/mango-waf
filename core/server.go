@@ -2,10 +2,18 @@ package core
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -166,8 +174,19 @@ func (s *Shield) Start() error {
 
 	// Build TLS config if enabled
 	var tlsConfig *tls.Config
-	if s.cfg.TLS.Enabled && s.cfg.TLS.CertFile != "" {
-		cert, err := tls.LoadX509KeyPair(s.cfg.TLS.CertFile, s.cfg.TLS.KeyFile)
+	if s.cfg.TLS.Enabled {
+		certFile := s.cfg.TLS.CertFile
+		if certFile == "" {
+			certFile = "certs/server.crt"
+		}
+		keyFile := s.cfg.TLS.KeyFile
+		if keyFile == "" {
+			keyFile = "certs/server.key"
+		}
+		if err := ensureTLSCertificates(certFile, keyFile); err != nil {
+			logger.Warn("Failed to ensure TLS certificates", "error", err)
+		}
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 		if err != nil {
 			return fmt.Errorf("load TLS cert: %w", err)
 		}
@@ -649,4 +668,79 @@ func printBanner(cfg *config.Config) {
 	fmt.Println("\033[36;1m" + banner + "\033[0m")
 	fmt.Printf("\033[32m  Domains: %d | Mode: %s\033[0m\n", len(cfg.Domains), cfg.Protection.Mode)
 	fmt.Printf("\033[32m  TLS: %v | Dashboard: %v\033[0m\n\n", cfg.TLS.Enabled, cfg.Dashboard.Enabled)
+}
+
+func ensureTLSCertificates(certFile, keyFile string) error {
+	if certFile == "" {
+		certFile = "certs/server.crt"
+	}
+	if keyFile == "" {
+		keyFile = "certs/server.key"
+	}
+
+	_, certErr := os.Stat(certFile)
+	_, keyErr := os.Stat(keyFile)
+	if certErr == nil && keyErr == nil {
+		return nil // Both files exist
+	}
+
+	logger.Info("TLS certificate files missing, generating self-signed RSA certificate...", "cert", certFile, "key", keyFile)
+
+	_ = os.MkdirAll(filepath.Dir(certFile), 0755)
+	_ = os.MkdirAll(filepath.Dir(keyFile), 0755)
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("generate rsa key: %w", err)
+	}
+
+	notBefore := time.Now()
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("generate serial number: %w", err)
+	}
+
+	template := x509.Certificate{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
+			Organization: []string{"Mango Shield WAF"},
+			CommonName:   "firewall.hidev.dev",
+		},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("103.77.246.198")},
+		DNSNames:              []string{"firewall.hidev.dev", "localhost"},
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
+	if err != nil {
+		return fmt.Errorf("create certificate: %w", err)
+	}
+
+	certOut, err := os.Create(certFile)
+	if err != nil {
+		return fmt.Errorf("create cert file: %w", err)
+	}
+	defer certOut.Close()
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: derBytes}); err != nil {
+		return fmt.Errorf("encode cert: %w", err)
+	}
+
+	keyOut, err := os.OpenFile(keyFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("create key file: %w", err)
+	}
+	defer keyOut.Close()
+	privBytes := x509.MarshalPKCS1PrivateKey(priv)
+	if err := pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: privBytes}); err != nil {
+		return fmt.Errorf("encode key: %w", err)
+	}
+
+	logger.Info("Self-signed TLS certificates generated successfully", "cert", certFile, "key", keyFile)
+	return nil
 }

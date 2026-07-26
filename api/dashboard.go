@@ -125,6 +125,7 @@ func (d *Dashboard) Start() error {
 }
 
 func (d *Dashboard) registerRoutes() {
+	d.mux.HandleFunc("/api/login", d.handleLogin)
 	d.mux.HandleFunc("/api/stats", d.handleStats)
 	d.mux.HandleFunc("/api/health", d.handleHealth)
 	d.mux.HandleFunc("/api/config", d.handleConfig)
@@ -132,6 +133,49 @@ func (d *Dashboard) registerRoutes() {
 	d.mux.HandleFunc("/api/system-stats", d.handleSystemStats)
 	d.mux.HandleFunc("/api/cache/purge", d.handleCachePurge)
 	d.mux.HandleFunc("/", d.handleDashboardUI)
+}
+
+func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Username == "" || req.Password == "" {
+		req.Username = r.FormValue("username")
+		req.Password = r.FormValue("password")
+	}
+
+	uMatch := subtle.ConstantTimeCompare([]byte(req.Username), []byte(d.cfg.Dashboard.Username)) == 1
+	pMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(d.cfg.Dashboard.Password)) == 1
+
+	if uMatch && pMatch {
+		token := fmt.Sprintf("mango-session-%d", time.Now().UnixNano())
+		http.SetCookie(w, &http.Cookie{
+			Name:     "mango_admin_session",
+			Value:    token,
+			Path:     "/",
+			HttpOnly: true,
+			MaxAge:   86400,
+		})
+		writeJSON(w, map[string]interface{}{
+			"status":  "ok",
+			"token":   token,
+			"user":    req.Username,
+			"message": "Admin login successful",
+		})
+		return
+	}
+
+	w.WriteHeader(http.StatusUnauthorized)
+	writeJSON(w, map[string]interface{}{
+		"status":  "error",
+		"message": "Invalid admin username or password",
+	})
 }
 
 func (d *Dashboard) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -389,7 +433,12 @@ func (d *Dashboard) handleDashboardUI(w http.ResponseWriter, r *http.Request) {
 func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Read-only telemetry endpoints accessible for monitoring & demo site
-		if r.URL.Path == "/api/health" || r.URL.Path == "/api/stats" || r.URL.Path == "/api/system-stats" || r.URL.Path == "/api/rps-history" || r.URL.Path == "/" {
+		if r.URL.Path == "/api/health" || r.URL.Path == "/api/stats" || r.URL.Path == "/api/system-stats" || r.URL.Path == "/api/rps-history" || r.URL.Path == "/api/login" || r.URL.Path == "/" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Cookie authentication check
+		if cookie, err := r.Cookie("mango_admin_session"); err == nil && strings.HasPrefix(cookie.Value, "mango-session-") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -398,8 +447,8 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 			uMatch := subtle.ConstantTimeCompare([]byte(user), []byte(d.cfg.Dashboard.Username)) == 1
 			pMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(d.cfg.Dashboard.Password)) == 1
 			if !ok || !uMatch || !pMatch {
-				w.Header().Set("WWW-Authenticate", `Basic realm="Mango Shield"`)
-				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				w.Header().Set("WWW-Authenticate", `Basic realm="Mango Shield Admin Dashboard"`)
+				http.Error(w, "Unauthorized Admin Access", http.StatusUnauthorized)
 				return
 			}
 		}

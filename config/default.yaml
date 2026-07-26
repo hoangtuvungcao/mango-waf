@@ -1,311 +1,156 @@
-# ╔══════════════════════════════════════════════════════════════╗
-# ║           🥭 MANGO SHIELD v2.0 — CẤU HÌNH HỆ THỐNG        ║
-# ║         Hệ thống chống DDoS L7 & WAF tự triển khai         ║
-# ╚══════════════════════════════════════════════════════════════╝
-#
-# 📌 Hướng dẫn:
-#   - Sao chép file này và đổi tên thành config.yaml
-#   - Chỉnh sửa các giá trị phù hợp với nhu cầu
-#   - Các giá trị có dấu # ở đầu là comment (giải thích)
-#   - Đơn vị thời gian: s=giây, m=phút, h=giờ
-#   - Gửi SIGHUP để tải lại cấu hình mà không cần restart
-#
-# ================================================================
+# ==============================================================================
+# MANGO SHIELD WAF v2.0 — Default Configuration
+# ==============================================================================
 
-# ================================================================
-# SERVER — Cấu hình máy chủ chính
-# ================================================================
-# Server lắng nghe kết nối từ client/người dùng.
-# • listen: cổng HTTPS chính (443 là chuẩn)
-# • http_listen: cổng HTTP (80), tự chuyển hướng sang HTTPS
-# • Timeout: thời gian tối đa chờ đọc/ghi/nghỉ
-# • max_header_bytes: kích thước tối đa header HTTP (chống tấn công header lớn)
 server:
-  listen: "0.0.0.0:443"              # Cổng HTTPS — 0.0.0.0 = lắng nghe tất cả interface
-  http_listen: "0.0.0.0:80"          # Cổng HTTP — chuyển hướng tự động sang HTTPS
-  read_timeout: 10s                  # Thời gian tối đa đọc request (chống Slowloris)
-  write_timeout: 30s                 # Thời gian tối đa ghi response
-  idle_timeout: 120s                 # Thời gian tối đa giữ kết nối rảnh
-  max_header_bytes: 65536            # Giới hạn header 64KB (chống tấn công header lớn)
+  listen: "0.0.0.0:443"
+  http_listen: "0.0.0.0:80"
+  read_timeout: 10s
+  write_timeout: 30s
+  idle_timeout: 60s
+  max_header_bytes: 1048576
 
-# ================================================================
-# TLS — Chứng chỉ SSL/HTTPS
-# ================================================================
-# Mã hóa kết nối giữa client và server.
-# • Bật TLS để sử dụng HTTPS (khuyến nghị luôn bật)
-# • Cung cấp đường dẫn đến file chứng chỉ (.pem) và khóa riêng
-# • Hỗ trợ TLS 1.2 và 1.3
 tls:
-  enabled: true                      # true = bật HTTPS | false = chỉ HTTP
-  cert_file: "certs/cert.pem"        # Đường dẫn file chứng chỉ SSL
-  key_file: "certs/key.pem"          # Đường dẫn file khóa riêng SSL
-  auto_cert: false                   # true = tự động lấy cert từ Let's Encrypt
-  acme_email: ""                     # Email cho Let's Encrypt (nếu auto_cert = true)
-  min_version: "1.2"                 # Phiên bản TLS tối thiểu: "1.2" hoặc "1.3"
+  enabled: true
+  cert_file: "certs/server.crt"
+  key_file: "certs/server.key"
+  auto_cert: false
+  acme_email: "admin@hidev.dev"
+  min_version: "1.2"
 
-# ================================================================
-# DOMAINS — Danh sách domain được bảo vệ
-# ================================================================
-# Mỗi domain trỏ về một backend (server gốc).
-# Mango Shield đứng giữa client và backend, lọc traffic xấu.
-#
-# Ví dụ: Khi người dùng truy cập example.com:
-#   Client → Mango Shield (lọc) → Backend http://127.0.0.1:8080
 domains:
-  - name: "example.com"              # Tên domain cần bảo vệ
+  - name: "firewall.hidev.dev"
     upstreams:
-      - url: "http://127.0.0.1:8080"  # Địa chỉ server gốc (nội bộ)
-    ssl: false                        # Backend có dùng HTTPS không
+      - url: "http://127.0.0.1:8080"
+        weight: 1
+    ssl: true
+  - name: "localhost"
+    upstreams:
+      - url: "http://127.0.0.1:8080"
+        weight: 1
+    ssl: false
 
-  # Thêm domain khác:
-  # - name: "api.example.com"
-  #   upstreams:
-  #     - url: "http://127.0.0.1:3000"
-
-# ================================================================
-# PROXY — Cấu hình reverse proxy
-# ================================================================
-# Proxy chuyển tiếp request từ client đến backend.
-# • connect_timeout: thời gian chờ kết nối đến backend
-# • response_timeout: thời gian chờ backend trả response
-# • max_idle_conns: số kết nối rảnh tối đa (giữ sẵn để tái sử dụng)
 proxy:
-  connect_timeout: 10s               # Chờ kết nối đến backend tối đa 10 giây
-  response_timeout: 60s              # Chờ backend trả response tối đa 60 giây
-  max_idle_conns: 100                # Số kết nối rảnh giữ sẵn (tăng nếu traffic lớn)
-  keep_alive: true                   # Tái sử dụng kết nối (tắt nếu backend không hỗ trợ)
-  websocket: true                    # Hỗ trợ WebSocket pass-through
+  connect_timeout: 5s
+  response_timeout: 30s
+  max_idle_conns: 100
+  keep_alive: true
+  websocket: true
 
-# ================================================================
-# PROTECTION — Cấu hình bảo vệ chính
-# ================================================================
-# Đây là phần QUAN TRỌNG NHẤT — điều khiển cách hệ thống bảo vệ.
-#
-# CÁC CHẾ ĐỘ (mode):
-#   • "auto"       — TỰ ĐỘNG thích ứng thông minh (KHUYẾN NGHỊ). 
-#                    Hệ thống tự nhận diện trình duyệt thật/ẩn danh để cho qua nhanh,
-#                    chỉ bật JS Challenge hoặc CAPTCHA khi có dấu hiệu DDoS hoặc IP nghi vấn.
-#   • "challenge"  — Ép tất cả phải giải thử thách Javascript (JS PoW).
-#   • "captcha"    — Ép tất cả phải nhấn giữ CAPTCHA để vào web.
-#   • "block"      — Chế độ bảo trì, chặn toàn bộ lượt truy cập mới.
-#   • "monitor"    — Chỉ theo dõi và ghi log, không chặn (Dùng để test).
 protection:
-  mode: "auto"                       # Chế độ bảo vệ — nên dùng "auto" cho người dùng thật
-
-  # ── Giới hạn tốc độ (Rate Limiting) ──
-  # Giới hạn số request mỗi giây từ mỗi IP.
-  # Nếu vượt quá → bị chặn tạm thời.
+  mode: "auto"
+  whitelist_ips:
+    - "127.0.0.1/32"
+  trusted_proxies:
+    - "127.0.0.1/32"
+    - "172.16.0.0/12"
+    - "10.0.0.0/8"
   rate_limit:
-    enabled: true                    # Bật giới hạn tốc độ
-    requests_per_second: 50          # Tối đa 50 req/s mỗi IP (điều chỉnh theo website)
-    burst: 100                       # Cho phép bùng nổ tạm 100 req (tải trang lần đầu)
-    per_ip: true                     # Giới hạn theo từng IP (true = mỗi IP riêng biệt)
-    adaptive: true                   # Tự động điều chỉnh theo tình hình traffic
-
-  # ── Giới hạn kết nối ──
-  # Giới hạn số kết nối đồng thời.
+    enabled: true
+    requests_per_second: 100
+    burst: 200
+    per_ip: true
+    adaptive: true
   connection_limit:
-    max_per_ip: 50                   # Tối đa 50 kết nối từ 1 IP (giảm nếu bị Slowloris)
-    max_total: 10000                 # Tổng kết nối tối đa toàn hệ thống
-
-  # ── Thử thách (Challenge) ──
-  # Khi hệ thống nghi ngờ là Bot hoặc bị DDoS, sẽ gửi lệnh xác minh:
-  #   Stage 1: JS Proof-of-Work (Web Check) - Tự động quay vòng tròn, không cần bấm.
-  #   Stage 2: CAPTCHA (Mango Verify) - Yêu cầu người dùng nhấn giữ nút để xác minh.
+    max_per_ip: 100
+    max_total: 50000
   challenge:
-    pow_difficulty: 3                # Độ khó tính toán: 3 (mượt), 4 (chống bot mạnh), 5 (nặng CPU)
-    pow_adaptive: true               # Tự tăng độ khó khi phát hiện tấn công dồn dập
-    cookie_ttl: 12h                  # Token xác minh có hiệu lực trong 12 tiếng
-    cookie_secret: "546869734973415365637265744b657931323334353637383930414243444546" # Khóa bảo mật (Bắt buộc giống nhau mọi Node để không bị bắt giải lại)
-
-  # ── Cấm IP (Ban) ──
-  # Khi một IP vi phạm quá nhiều hoặc giải sai thử thách.
+    pow_difficulty: 2
+    pow_adaptive: true
+    cookie_ttl: 1h
+    cookie_secret: "mangoshieldsupersecretcookiek3y32b"
   ban:
-    duration: 10m                    # Cấm IP trong vòng 10 phút
-    max_fails: 3                     # Giải sai 3 lần là khóa luôn IP
-    use_iptables: true               # Bật true để chặn IP ngay từ Firewall hệ thống (Cực nhẹ CPU)
-
-  # ── Chế độ khẩn cấp (Emergency Mode) ──
-  # Tự động kích hoạt khi cả hệ thống bị quá tải nặng (DDoS triệu request).
+    duration: 1h
+    max_fails: 10
+    use_iptables: true
   emergency:
-    rps_threshold: 1000              # Bật khẩn cấp nếu tổng traffic toàn server > 1000 RPS
-    duration: 60s                    # Giữ trạng thái khẩn cấp trong 60 giây để ổn định
-    auto_enable: true                # Tự động bật/tắt dựa trên monitor
+    rps_threshold: 5000
+    duration: 10m
+    auto_enable: true
 
-# ================================================================
-# FINGERPRINT — Nhận dạng trình duyệt/bot
-# ================================================================
-# Phân tích "dấu vân tay" kết nối TLS và HTTP/2 để phân biệt
-# trình duyệt thật (Chrome, Firefox...) với công cụ tấn công.
-#
-# • JA3/JA4: phân tích cách client bắt tay TLS
-# • HTTP/2: phân tích cài đặt HTTP/2 của client
-# • UA: kiểm tra User-Agent có khớp với TLS fingerprint không
 fingerprint:
   ja3:
-    enabled: true                    # Bật nhận dạng JA3 (phổ biến nhất)
-    block_unknown: false             # true = chặn fingerprint không xác định (cẩn thận!)
+    enabled: true
+    block_unknown: false
   ja4:
-    enabled: true                    # Bật nhận dạng JA4 (chính xác hơn JA3)
+    enabled: true
   http2:
-    enabled: true                    # Bật nhận dạng HTTP/2 fingerprint
+    enabled: true
   ua_consistency:
-    enabled: true                    # Kiểm tra UA có khớp TLS fingerprint
-    strict: false                    # true = nghiêm ngặt (có thể chặn nhầm)
-
-# ================================================================
-# INTELLIGENCE — Lớp tình báo
-# ================================================================
-# Thu thập thông tin về IP để đánh giá mức độ đáng tin cậy.
+    enabled: true
+    strict: false
 
 intelligence:
-  # ── GeoIP: Xác định vị trí địa lý ──
-  # Cho phép chặn hoặc chỉ cho phép traffic từ các quốc gia cụ thể.
-  # Tải database từ: https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
   geoip:
-    enabled: true                    # Bật tra cứu vị trí địa lý
-    db_path: "./GeoLite2-City.mmdb"  # Đường dẫn file database GeoIP
-    blocked_countries: []            # Danh sách quốc gia bị chặn, VD: ["CN", "RU", "KP"]
-    allowed_countries: []            # Chỉ cho phép các quốc gia này (trống = tất cả)
-
-  # ── IP Reputation: Kiểm tra danh tiếng IP ──
-  # Tra cứu IP trong database AbuseIPDB để biết IP có từng bị báo cáo.
-  # Đăng ký miễn phí: https://www.abuseipdb.com/register
+    enabled: true
+    db_path: "data/GeoLite2-Country.mmdb"
+    blocked_countries: []
+    allowed_countries: []
   ip_reputation:
-    enabled: false                   # Bật kiểm tra danh tiếng IP
-    abuseipdb_key: "4b91ed6e28c8443105e50680adc349833e65ea07f5c2129eed203b28eea5ff95e8771572a91b5951"                # API Key từ AbuseIPDB (bắt buộc nếu enabled=true, hoặc qua ENV MANGO_INTELLIGENCE_IP_REPUTATION_ABUSEIPDB_KEY)
-    cache_ttl: 1h                    # Cache kết quả 1 giờ (giảm số API call)
-
-  # ── ASN: Phân loại nhà mạng ──
-  # Xác định IP thuộc nhà mạng nào (hosting, CDN, ISP, giáo dục...).
-  # IP từ hosting/datacenter có rủi ro cao hơn IP từ ISP gia đình.
+    enabled: true
+    abuseipdb_key: ""
+    cache_ttl: 12h
   asn:
-    enabled: true                    # Bật phân loại ASN
-    block_datacenter: false          # true = chặn IP từ datacenter (cẩn thận với API client)
+    enabled: true
+    block_datacenter: false
 
-# ================================================================
-#  DETECTION — Phát hiện tấn công
-# ================================================================
-# Hệ thống phát hiện bao gồm:
-#   • Baseline: học mẫu traffic bình thường
-#   • Anomaly: phát hiện bất thường (so với baseline)
-#   • Bot Classifier: phân loại bot (13 chữ ký)
-#   • Session Tracking: theo dõi phiên người dùng
 detection:
-  # Giai đoạn học — hệ thống học traffic bình thường trong 24h đầu
   baseline:
-    enabled: true                    # Bật học đường cơ sở
-    learning_period: 24h             # Thời gian học: 24 giờ (sau đó tự điều chỉnh liên tục)
-
-  # Phát hiện bất thường — so sánh traffic hiện tại với baseline
+    enabled: true
+    learning_period: 15m
   anomaly:
-    enabled: true                    # Bật phát hiện bất thường
-    sensitivity: 0.7                 # Độ nhạy: 0.0=thấp → 1.0=cao (0.7 là cân bằng)
-
-  # Phân loại bot — nhận dạng bot bằng 13 chữ ký
+    enabled: true
+    sensitivity: 2.0
   bot_classifier:
-    enabled: true                    # Bật phân loại bot
-    model_path: ""                   # Đường dẫn model ML (để trống = dùng heuristic)
-
-  # Theo dõi phiên — ghi nhớ hành vi của từng client
+    enabled: true
+    model_path: "rules/bot_model.json"
   session_tracking:
-    enabled: true                    # Bật theo dõi phiên
-    ttl: 30m                         # Phiên hết hạn sau 30 phút không hoạt động
+    enabled: true
+    ttl: 30m
 
-# ================================================================
-#  WAF — Tường lửa Ứng dụng Web
-# ================================================================
-# Kiểm tra nội dung request để phát hiện tấn công ứng dụng:
-#   • SQL Injection (SQLi)
-#   • Cross-Site Scripting (XSS)
-#   • Local File Inclusion (LFI)
-#   • Remote Code Execution (RCE)
-#   • Server Side Request Forgery (SSRF)
-#   • Và nhiều loại khác...
-#
-# Paranoia Level (mức độ nghiêm ngặt):
-#   1 = Cơ bản (ít false positive, khuyến nghị bắt đầu)
-#   2 = Tiêu chuẩn (phát hiện nhiều hơn, một số false positive)
-#   3 = Nghiêm ngặt (nhiều false positive hơn)
-#   4 = Cực kỳ nghiêm ngặt (chỉ dùng cho môi trường nhạy cảm)
 waf:
-  enabled: true                      # Bật WAF (khuyến nghị luôn bật)
-  owasp_rules: true                  # Sử dụng bộ quy tắc OWASP CRS (28 rule)
-  custom_rules_path: ""              # Đường dẫn file YAML rule tùy chỉnh
-  paranoia_level: 2                  # Mức nghiêm ngặt: 1-4 (bắt đầu với 2)
+  enabled: true
+  owasp_rules: true
+  custom_rules_path: "rules/"
+  paranoia_level: 2
 
-# ================================================================
-# LOGGING — Ghi log hệ thống
-# ================================================================
-# Log giúp theo dõi hoạt động và điều tra sự cố.
 logging:
-  level: "info"                      # Mức log: debug | info | warn | error
-  format: "json"                     # Định dạng: json (máy đọc) | text (người đọc)
-  file: ""                           # File log (trống = log ra console/stdout cho Docker)
-  max_size_mb: 100                   # Kích thước tối đa 1 file log (MB)
-  max_backups: 5                     # Số file log cũ giữ lại
-  attack_log: ""                     # File log riêng cho tấn công (trống = gộp chung)
+  level: "info"
+  format: "json"
+  file: "logs/mango-shield.log"
+  max_size_mb: 100
+  max_backups: 10
+  attack_log: "logs/attack.log"
 
-# ================================================================
-# METRICS — Số liệu giám sát
-# ================================================================
-# Xuất metrics dạng Prometheus để giám sát với Grafana.
 metrics:
-  enabled: true                      # Bật endpoint metrics
-  listen: "0.0.0.0:9100"            # Địa chỉ endpoint metrics
-  path: "/metrics"                   # Đường dẫn URL metrics
+  enabled: true
+  listen: "0.0.0.0:9100"
+  path: "/metrics"
 
-# ================================================================
-# DASHBOARD — Bảng điều khiển web
-# ================================================================
-# Giao diện web hiển thị thống kê thời gian thực.
-# Truy cập qua trình duyệt: http://127.0.0.1:9090
 dashboard:
-  enabled: true                      # Bật bảng điều khiển
-  listen: "0.0.0.0:9090"            # Địa chỉ — 0.0.0.0 (public dashboard API)
-  username: "admin"                  # Tên đăng nhập (đổi trước khi deploy!)
-  password: "admin123"                       # Mật khẩu (ĐỔI MẬT KHẨU MẠNH HOẶC DÙNG ENV MANGO_DASHBOARD_PASSWORD)
-  jwt_secret: ""                     # Khóa JWT (trống = tự tạo ngẫu nhiên mỗi lần khởi động)
+  enabled: true
+  listen: "0.0.0.0:9090"
+  username: "admin"
+  password: "admin123_change_in_production"
+  jwt_secret: "mangoshielddashboardjwtsecretkey32"
 
-# ================================================================
-# ALERTS — Cảnh báo tấn công
-# ================================================================
-# Gửi thông báo khi phát hiện tấn công hoặc sự kiện quan trọng.
-# Hỗ trợ: Telegram, Discord, Webhook tùy chỉnh.
 alerts:
-
-  # ── Telegram ──
   telegram:
-    enabled: true                  # Bật cảnh báo Telegram
-    token: "8494737835:AAGCiDKjc7FQ2IMlXNLhrGMa_UCSe_ZGiFw"                       # Token Bot (hoặc qua ENV MANGO_ALERTS_TELEGRAM_TOKEN)
-    chat_id: "8794276117"                     # Chat ID (hoặc qua ENV MANGO_ALERTS_TELEGRAM_CHAT_ID)
-
-  # ── Discord ──
-  # Nhận cảnh báo qua Discord Webhook.
-  # Cách tạo:
-  #   1. Vào kênh Discord → Cài đặt → Tích hợp
-  #   2. Tạo Webhook mới → Sao chép URL
+    enabled: false
+    token: ""
+    chat_id: ""
   discord:
-    enabled: true                   # Bật cảnh báo Discord
-    webhook_url: "https://discordapp.com/api/webhooks/1493704845054578848/aNtNzatKghnVt2ly1Yopa5EFDGt1IlMA5Z467_mfmm-jE-VDyxoMNyE4EEqerRKbbsL4"                  # URL Webhook từ Discord
-
-  # ── Webhook tùy chỉnh ──
-  # Gửi cảnh báo đến bất kỳ URL nào (POST JSON).
-  # Body JSON: {"message": "...", "timestamp": "...", "source": "mango-shield"}
+    enabled: false
+    webhook_url: ""
   webhook:
-    enabled: false                   # Bật webhook tùy chỉnh
-    url: ""                          # URL nhận webhook (POST)
-    secret: ""                       # Khóa bí mật (gửi trong header X-Webhook-Secret)
+    enabled: false
+    url: ""
+    secret: ""
 
-# ================================================================
-# ⚡ CDN & CACHING (Tối ưu Băng thông & Tốc độ)
-# ================================================================
-# Giảm tải tới 90% cho Server gốc bằng cách lưu đệm các tệp tin tĩnh
-# thẳng lên RAM của Firewall. Tự động bỏ qua Cache với các nội dung động.
 cdn:
-  enabled: true                      # Bật tính năng CDN đệm RAM
-  memory_limit_mb: 256               # Giới hạn tối đa RAM dành cho bộ đệm (Megabyte)
-  static_extensions:                 # Chỉ lưu đệm các File có đuôi mở rộng này
+  enabled: true
+  memory_limit_mb: 256
+  static_extensions:
     - ".css"
     - ".js"
     - ".png"
@@ -317,41 +162,31 @@ cdn:
     - ".woff2"
     - ".ttf"
     - ".ico"
-  bypass_rules:                      # TUYỆT ĐỐI KHÔNG ĐỆM các đường dẫn URL này
+    - ".webp"
+  bypass_rules:
     - "/api/*"
+    - "/dashboard/*"
     - "/admin/*"
-    - "/wp-admin/*"
-  bypass_cookies:                    # Bỏ qua Cache nếu phát hiện người dùng đang đăng nhập (nhờ Cookie)
-    - "wordpress_logged_in"
-    - "laravel_session"
-  bypass_headers:                    # Bỏ qua Cache nếu trình duyệt gửi yêu cầu đặc biệt
-    - "X-No-Cache"
+    - "/login"
+  bypass_cookies:
+    - "session_id"
+    - "auth_token"
+    - "mango_admin_session"
+  bypass_headers:
+    - "Authorization"
 
-# ================================================================
-# CLUSTER P2P (Mango Mesh)
-# ================================================================
-# Dành cho hệ thống nhiều VPS (Multi-Node Cluster).
-# Các Firewall tự liên lạc với nhau qua Gossip Protocol (UDP/TCP)
-# để báo cáo IP xấu. Ví dụ: Node Hà Nội chặn IP A -> Tự báo cho
-# Node Hồ Chí Minh chặn theo chỉ trong vài Mili-Giây.
 cluster:
-  enabled: true                      # Bật chế độ Cụm đa máy chủ (Mango Mesh)
-  node_name: "mango-node-1"          # Tên duy nhất định danh máy chủ này
-  bind_port: 7946                    # Cổng giao diện Gossip (Cần mở Firewall cả TCP và UDP)
-  advertise_ip: ""                   # IP Public của VPS (Để các máy khác liên lạc)
-  secret_key: "AES-32-MANGO-SHIELD-GOSSIP-KEY!!" # Khóa mã hóa Mesh (Bắt buộc 32 ký tự và giống nhau mọi máy)
-  join_peers: []                     # Danh sách IP của các máy đã có trong cụm để kết nối
-  # Ví dụ (Node 2 nối vào Node 1):
-  # join_peers: ["103.77.246.172:7946"]
+  enabled: true
+  node_name: "mango-node-primary"
+  bind_port: 7946
+  advertise_ip: ""
+  join_peers: []
+  secret_key: "mangoshieldclustersecretkey32"
 
-# ================================================================
-# XDP & eBPF ACCELERATION
-# ================================================================
 xdp:
-  enabled: true                      # Bật XDP Kernel Packet Dropping
-  interface: "eth0"                  # Tên giao diện mạng NIC
-  mode: "skb"                        # Mode: skb (generic) | drv (native) | hw (offload)
-  map_pin_path: "/sys/fs/bpf/mango_blacklist" # Đường dẫn BPF map pinned
-  auto_compile: true                 # Tự động biên dịch xdp/mango_xdp.c khi thiếu
-  auto_attach: true                  # Tự động attach XDP vào NIC khi khởi động
-
+  enabled: true
+  interface: "eth0"
+  mode: "skb"
+  map_pin_path: "/sys/fs/bpf/mango_blacklist"
+  auto_compile: true
+  auto_attach: true

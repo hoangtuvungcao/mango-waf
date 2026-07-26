@@ -61,7 +61,7 @@ services:
     environment:
       - TZ=Asia/Ho_Chi_Minh
       - MANGO_DOMAIN=firewall.hidev.dev
-      - MANGO_API_URL=http://mango-shield:9090
+      - MANGO_API_URL=http://127.0.0.1:9090
 
 networks:
   shield-net:

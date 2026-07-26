@@ -4,6 +4,19 @@ All notable changes to **Mango Shield** are documented in this file.
 
 ---
 
+## [2.0.1] - 2026-07-26
+
+### Added
+- **Exhaustive Production Configuration**: Created fully documented `config/production.yaml` with inline comments for every setting (purpose, valid values, recommended default, performance impact, security impact).
+- **Admin Authentication API (`POST /api/login`)**: Added session authentication token endpoint and modal UI for dashboard administration.
+- **Upgraded Interactive Canvas Charts**: Added numerical Y-axis labels, units, X-axis time markers (-60s to now), and hover tooltips across all test-site charts.
+- **Tab Navigation Auto-Redraw**: Fixed tab click handlers in `test-site/server.go` to force instant canvas redrawing upon switching active tab views.
+- **XDP/eBPF Subsystem Auto-Attach & Map Pinning**: Added `auto_compile`, `auto_attach`, and `bpftool` map ID discovery to `core/xdp.go`.
+- **HTTP 429 Rate Limit Response**: Wired `ActionRateLimit` in `core/pipeline.go` and `core/server.go` to return HTTP 429 Too Many Requests with commercial 429 template.
+- **Authoritative eBPF/XDP Documentation**: Added `docs/XDP_GUIDE.md` and synchronized all project documentation.
+
+---
+
 ## [2.0.0] - 2026-07-26
 
 ### Added

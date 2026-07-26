@@ -404,6 +404,12 @@ func setDefaults(cfg *Config) {
 	if cfg.Dashboard.JWTSecret == "" {
 		cfg.Dashboard.JWTSecret = randomHex(32)
 	}
+	if cfg.Dashboard.Username == "" {
+		cfg.Dashboard.Username = "admin"
+	}
+	if cfg.Dashboard.Password == "" {
+		cfg.Dashboard.Password = "admin123_change_in_production"
+	}
 	if cfg.WAF.ParanoiaLevel == 0 {
 		cfg.WAF.ParanoiaLevel = 1
 	}
