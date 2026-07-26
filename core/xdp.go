@@ -87,6 +87,31 @@ func NewXDPManager(cfg *config.Config) *XDPManager {
 		}
 	}
 
+	// 5. Create standalone BPF hash map if not found — allows XDP blacklist
+	// to work inside Docker containers with CAP_BPF + /sys/fs/bpf mounted
+	if _, err := os.Stat("/sys/fs/bpf"); err == nil {
+		fd, err := bpfMapCreate(1, 4, 8, 1000000) // BPF_MAP_TYPE_HASH, key=4 (IPv4), val=8 (counter), max=1M
+		if err == nil && fd > 0 {
+			x.mapFD = fd
+			x.Enabled = true
+
+			// Pin the map so it persists across restarts
+			pinPath := cfg.XDP.MapPinPath
+			if pinPath == "" {
+				pinPath = "/sys/fs/bpf/mango_blacklist"
+			}
+			if err := bpfObjPin(fd, pinPath); err != nil {
+				logger.Warn("XDP BPF map created but pinning failed (map still active in-memory)", "error", err)
+			} else {
+				logger.Info("XDP eBPF blacklist map created and pinned", "path", pinPath, "fd", fd)
+			}
+			return x
+		}
+		if err != nil {
+			logger.Warn("XDP BPF_MAP_CREATE failed", "error", err)
+		}
+	}
+
 	// Check root privilege for informative warning
 	if currentUser, err := user.Current(); err == nil && currentUser.Uid != "0" {
 		logger.Warn("XDP requires root / CAP_BPF privileges and attached NIC filter. Run xdp/setup_xdp.sh or set auto_attach: true.")
@@ -322,11 +347,58 @@ func bpfObjGet(path string) (int, error) {
 	attr := bpfAttrObjGet{
 		pathname: uint64(uintptr(unsafe.Pointer(pathBytes))),
 	}
-	r1, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(6), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	r1, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(7), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
 	if errno != 0 {
 		return -1, errno
 	}
 	return int(r1), nil
+}
+
+// bpfAttrMapCreate corresponds to BPF_MAP_CREATE union bpf_attr fields
+type bpfAttrMapCreate struct {
+	mapType    uint32
+	keySize    uint32
+	valueSize  uint32
+	maxEntries uint32
+	mapFlags   uint32
+}
+
+// bpfMapCreate creates a new BPF hash map via BPF_MAP_CREATE (cmd=0)
+func bpfMapCreate(mapType, keySize, valueSize, maxEntries uint32) (int, error) {
+	attr := bpfAttrMapCreate{
+		mapType:    mapType,
+		keySize:    keySize,
+		valueSize:  valueSize,
+		maxEntries: maxEntries,
+	}
+	r1, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(0), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	if errno != 0 {
+		return -1, errno
+	}
+	return int(r1), nil
+}
+
+// bpfObjPin pins a BPF object (map/prog) to a filesystem path via BPF_OBJ_PIN (cmd=6)
+func bpfObjPin(fd int, path string) error {
+	pathBytes, err := unix.BytePtrFromString(path)
+	if err != nil {
+		return err
+	}
+	// Reuse bpfAttrObjGet struct layout — pathname + fd
+	type bpfAttrObjPin struct {
+		pathname uint64
+		bpfFd    uint32
+		pad      uint32
+	}
+	attr := bpfAttrObjPin{
+		pathname: uint64(uintptr(unsafe.Pointer(pathBytes))),
+		bpfFd:    uint32(fd),
+	}
+	_, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(6), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	if errno != 0 {
+		return errno
+	}
+	return nil
 }
 
 func bpfMapUpdateElem(fd int, key, value unsafe.Pointer, flags uint64) error {

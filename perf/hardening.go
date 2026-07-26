@@ -28,7 +28,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), interest-cohort=()")
 
 		// Content security policy - allowed jsdelivr for Chart.js fallback
-		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' blob: cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+		h.Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' blob: cdn.jsdelivr.net; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' fonts.googleapis.com; font-src 'self' fonts.gstatic.com; img-src 'self' data:; connect-src 'self'")
 
 		// Hide server info
 		h.Set("Server", "Mango")
