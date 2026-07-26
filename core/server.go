@@ -243,7 +243,7 @@ func (s *Shield) Start() error {
 			switch state {
 			case http.StateNew:
 				active := atomic.AddInt64(&s.stats.ActiveConns, 1)
-				if active > 25000 {
+				if active > 100000 {
 					atomic.AddInt64(&s.stats.ActiveConns, -1)
 					conn.Close()
 					return
