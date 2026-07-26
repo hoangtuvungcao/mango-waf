@@ -405,6 +405,10 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	case ActionBlock:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
+		// Push banned IP straight down to NIC XDP eBPF BPF Map + Linux Kernel IPSet + P2P Mesh Cluster
+		if !s.pipeline.isTrustedProxy(ip) {
+			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
+		}
 		if s.challMgr != nil {
 			s.challMgr.ServeBlockPage(w, r, ip, "WAF Rule", action.Reason)
 		} else {
@@ -430,6 +434,9 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	case ActionRateLimit:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
+		if !s.pipeline.isTrustedProxy(ip) {
+			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
+		}
 		if s.challMgr != nil {
 			s.challMgr.ServeRateLimitPage(w, r, ip, 10)
 		} else {
@@ -447,6 +454,10 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	case ActionDrop:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
+		// Push banned IP straight down to NIC XDP eBPF BPF Map + Linux Kernel IPSet + P2P Mesh Cluster
+		if !s.pipeline.isTrustedProxy(ip) {
+			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration*2)
+		}
 		// Silently close connection
 		hj, ok := w.(http.Hijacker)
 		if ok {
