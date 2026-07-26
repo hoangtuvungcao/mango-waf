@@ -131,7 +131,7 @@ dashboard:
   enabled: true
   listen: "0.0.0.0:9090"
   username: "admin"
-  password: "admin123_change_in_production"
+  password: "admin123"
   jwt_secret: "mangoshielddashboardjwtsecretkey32"
 
 alerts:
