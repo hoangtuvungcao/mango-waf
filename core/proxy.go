@@ -13,6 +13,23 @@ import (
 	"mango-waf/logger"
 )
 
+var sharedTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout:   5 * time.Second,
+		KeepAlive: 60 * time.Second,
+	}).DialContext,
+	MaxIdleConns:          50000,
+	MaxIdleConnsPerHost:   20000,
+	MaxConnsPerHost:       50000,
+	IdleConnTimeout:       120 * time.Second,
+	ResponseHeaderTimeout: 10 * time.Second,
+	ExpectContinueTimeout: 1 * time.Second,
+	ForceAttemptHTTP2:     true,
+	DisableKeepAlives:     false,
+	WriteBufferSize:       64 * 1024,
+	ReadBufferSize:        64 * 1024,
+}
+
 // proxyRequest forwards the request to the backend
 func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Find next available upstream backend for this domain
@@ -64,17 +81,7 @@ func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	// === END CACHING LAYER ===
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   s.cfg.Proxy.ConnectTimeout,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		MaxIdleConns:          s.cfg.Proxy.MaxIdleConns,
-		MaxIdleConnsPerHost:   s.cfg.Proxy.MaxIdleConns / 2,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: s.cfg.Proxy.ResponseTimeout,
-		DisableKeepAlives:     !s.cfg.Proxy.KeepAlive,
-	}
+	proxy.Transport = sharedTransport
 
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		logger.Error("Proxy error", "backend", backend, "error", err)
