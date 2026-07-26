@@ -599,6 +599,11 @@ func (s *Shield) extractIP(r *http.Request) string {
 		peerHost = r.RemoteAddr
 	}
 
+	// Always prioritize Cloudflare connecting IP if header is present
+	if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
+		return trimSpace(cfip)
+	}
+
 	// Check if peer is in trusted proxies list
 	if len(s.cfg.Protection.TrustedProxies) > 0 {
 		isTrusted := false
@@ -618,9 +623,6 @@ func (s *Shield) extractIP(r *http.Request) string {
 		}
 
 		if isTrusted {
-			if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
-				return trimSpace(cfip)
-			}
 			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 				parts := splitFirst(xff, ",")
 				return trimSpace(parts)

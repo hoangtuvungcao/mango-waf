@@ -98,9 +98,15 @@ func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		return nil
 	}
 
-	// Set forwarding headers
-	r.Header.Set("X-Real-IP", extractIP(r))
-	r.Header.Set("X-Forwarded-For", r.RemoteAddr)
+	// Set forwarding headers with real client IP
+	clientIP := s.extractIP(r)
+	r.Header.Set("X-Real-IP", clientIP)
+	if cfIP := r.Header.Get("CF-Connecting-IP"); cfIP != "" {
+		r.Header.Set("CF-Connecting-IP", cfIP)
+		r.Header.Set("X-Forwarded-For", cfIP)
+	} else {
+		r.Header.Set("X-Forwarded-For", clientIP)
+	}
 	r.Header.Set("X-Forwarded-Proto", "https")
 	r.Header.Set("X-Mango-Shield", "v2.0")
 

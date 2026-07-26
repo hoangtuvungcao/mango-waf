@@ -11,33 +11,33 @@ import (
 )
 
 type StatsResponse struct {
-	TotalRequests   int64         `json:"total_requests"`
-	PassedReqs      int64         `json:"passed_requests"`
-	BlockedReqs     int64         `json:"blocked_requests"`
-	Challenged      int64         `json:"challenged_requests"`
-	CurrentRPS      int64         `json:"current_rps"`
-	PeakRPS         int64         `json:"peak_rps"`
-	ActiveConns     int64         `json:"active_conns"`
-	ActiveBans      int64         `json:"active_bans"`
-	IsUnderAttack   bool          `json:"is_under_attack"`
-	UptimeSeconds   float64       `json:"uptime_seconds"`
-	XDPEnabled      bool          `json:"xdp_enabled"`
-	XDPBannedIPs    int64         `json:"xdp_banned_ips"`
-	XDPDroppedPkts  int64         `json:"xdp_dropped_pkts"`
-	CacheHits       int64         `json:"cache_hits"`
-	CacheMisses     int64         `json:"cache_misses"`
-	CacheBypasses   int64         `json:"cache_bypasses"`
-	MeshEnabled     bool          `json:"mesh_enabled"`
-	MeshNodes       int           `json:"mesh_nodes"`
-	MeshMembers     []interface{} `json:"mesh_members"`
-	HistPassed      []uint64      `json:"hist_passed"`
-	HistBlocked     []uint64      `json:"hist_blocked"`
-	CurrPassed      uint64        `json:"curr_passed"`
-	CurrBlocked     uint64        `json:"curr_blocked"`
-	Bps             uint64        `json:"bps"`
-	Pps             uint64        `json:"pps"`
-	Status          string        `json:"status"`
-	Uptime          string        `json:"uptime"`
+	TotalRequests  int64         `json:"total_requests"`
+	PassedReqs     int64         `json:"passed_requests"`
+	BlockedReqs    int64         `json:"blocked_requests"`
+	Challenged     int64         `json:"challenged_requests"`
+	CurrentRPS     int64         `json:"current_rps"`
+	PeakRPS        int64         `json:"peak_rps"`
+	ActiveConns    int64         `json:"active_conns"`
+	ActiveBans     int64         `json:"active_bans"`
+	IsUnderAttack  bool          `json:"is_under_attack"`
+	UptimeSeconds  float64       `json:"uptime_seconds"`
+	XDPEnabled     bool          `json:"xdp_enabled"`
+	XDPBannedIPs   int64         `json:"xdp_banned_ips"`
+	XDPDroppedPkts int64         `json:"xdp_dropped_pkts"`
+	CacheHits      int64         `json:"cache_hits"`
+	CacheMisses    int64         `json:"cache_misses"`
+	CacheBypasses  int64         `json:"cache_bypasses"`
+	MeshEnabled    bool          `json:"mesh_enabled"`
+	MeshNodes      int           `json:"mesh_nodes"`
+	MeshMembers    []interface{} `json:"mesh_members"`
+	HistPassed     []uint64      `json:"hist_passed"`
+	HistBlocked    []uint64      `json:"hist_blocked"`
+	CurrPassed     uint64        `json:"curr_passed"`
+	CurrBlocked    uint64        `json:"curr_blocked"`
+	Bps            uint64        `json:"bps"`
+	Pps            uint64        `json:"pps"`
+	Status         string        `json:"status"`
+	Uptime         string        `json:"uptime"`
 }
 
 var (
@@ -893,6 +893,13 @@ body {
 (function() {
 'use strict';
 
+// ======================== DATA STATE ========================
+var homeRps = new Array(60).fill(0);
+var cpuHist = new Array(60).fill(0);
+var lastBlocked = 0, connected = false, retryDelay = 1000;
+var prevRx = 0, prevTx = 0;
+var secLogs = [], eventLogs = [], testLogs = [];
+
 // ======================== ADMIN MODAL & AUTH ========================
 window.toggleAdminModal = function() {
   var modal = document.getElementById('adminModal');
@@ -1137,7 +1144,7 @@ var prevRx = 0, prevTx = 0;
 
 // ======================== FETCH STATS ========================
 function fetchStats() {
-  fetch('/api/dstat').then(function(r) { return r.json(); }).then(function(d) {
+  fetch('/api/dstat?_=' + Date.now()).then(function(r) { return r.json(); }).then(function(d) {
     connected = true; retryDelay = 1000;
     document.getElementById('connDot').className = 'conn-dot on';
     document.getElementById('connText').textContent = 'Connected';
@@ -1235,14 +1242,14 @@ function fetchStats() {
   });
 
   // RPS history for dashboard chart
-  fetch('/api/rps-history').then(function(r) { return r.json(); }).then(function(d) {
+  fetch('/api/rps-history?_=' + Date.now()).then(function(r) { return r.json(); }).then(function(d) {
     if (d && d.rps) drawLineChart('dashChart', d.rps, 'rgb(6,182,212)', null, 'RPS');
   }).catch(function(){});
 }
 
 // ======================== FETCH SYSTEM STATS (DSTAT) ========================
 function fetchSystemStats() {
-  fetch('/api/system-stats').then(function(r) { return r.json(); }).then(function(d) {
+  fetch('/api/system-stats?_=' + Date.now()).then(function(r) { return r.json(); }).then(function(d) {
     if (d.error) return;
 
     var cpuPct = Math.round(d.cpu_percent || 0);
@@ -1284,7 +1291,7 @@ function fetchSystemStats() {
     drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
 
     // Stats chart (passed vs blocked)
-    fetch('/api/dstat').then(function(r){return r.json()}).then(function(sd) {
+    fetch('/api/dstat?_=' + Date.now()).then(function(r){return r.json()}).then(function(sd) {
       if (sd.hist_passed && sd.hist_blocked) {
         drawLineChart('statsChart', sd.hist_passed, 'rgb(16,185,129)', null, 'req');
       }
