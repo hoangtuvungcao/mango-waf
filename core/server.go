@@ -242,6 +242,11 @@ func (s *Shield) Start() error {
 			switch state {
 			case http.StateNew:
 				atomic.AddInt64(&s.stats.ActiveConns, 1)
+				// Do not apply socket-level CPS/Conn bans to trusted proxies (Cloudflare)
+				if s.pipeline.isTrustedProxy(ip) {
+					return
+				}
+
 				// CPS Protection
 				if !s.pipeline.CheckConnRate(ip) {
 					s.pipeline.banIP(ip, s.cfg.Protection.Ban.Duration)

@@ -721,7 +721,7 @@ body {
 
   <div class="card mb-24">
     <div class="card-title">Real-Time Traffic Telemetry (60s window)</div>
-    <div class="chart-wrap"><canvas id="homeChart"></canvas></div>
+    <div class="chart-wrap"><canvas id="homeChart" width="800" height="200"></canvas></div>
   </div>
 
   <div class="grid-2">
@@ -929,10 +929,9 @@ window.submitAdminLogin = function(e) {
 };
 
 // ======================== TAB NAVIGATION ========================
-// ======================== TAB NAVIGATION ========================
-window.switchTab = function(tabName) {
+function switchTab(tabName) {
   if (!tabName) return;
-  var tabs = document.querySelectorAll('.nav-tab');
+  var tabs = document.getElementsByClassName('nav-tab');
   for (var i = 0; i < tabs.length; i++) {
     var dt = tabs[i].getAttribute('data-tab');
     if (dt === tabName) {
@@ -942,7 +941,7 @@ window.switchTab = function(tabName) {
     }
   }
 
-  var pages = document.querySelectorAll('.page');
+  var pages = document.getElementsByClassName('page');
   for (var j = 0; j < pages.length; j++) {
     if (pages[j].id === 'page-' + tabName) {
       pages[j].className = 'page active';
@@ -952,8 +951,8 @@ window.switchTab = function(tabName) {
   }
 
   try {
-    if (tabName === 'home') drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
-    if (tabName === 'dstat') drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
+    if (tabName === 'home') drawLineChart('homeChart', homeRps, '#06b6d4', null, 'RPS');
+    if (tabName === 'dstat') drawLineChart('cpuChart', cpuHist, '#06b6d4', 100, '%');
     if (tabName === 'dashboard' || tabName === 'stats') {
       fetchStats();
       fetchSystemStats();
@@ -961,7 +960,8 @@ window.switchTab = function(tabName) {
   } catch(err) {
     console.error('Chart update error:', err);
   }
-};
+}
+window.switchTab = switchTab;
 
 document.addEventListener('click', function(e) {
   var t = e.target ? e.target.closest('.nav-tab') : null;
@@ -1023,102 +1023,110 @@ function renderLogs(arr, elId) {
 }
 
 // ======================== CANVAS CHART ========================
-function drawLineChart(canvasId, data, color, maxOverride, unit) {
-  var c = document.getElementById(canvasId);
-  if (!c || !c.parentElement) return;
-  var ctx = c.getContext('2d');
-  var pW = c.parentElement.clientWidth || 600;
-  var pH = parseInt(getComputedStyle(c).height) || 200;
-  c.width = pW; c.height = pH;
-  ctx.clearRect(0, 0, pW, pH);
+function drawLineChart(canvasId, data, strokeColor, maxOverride, unit) {
+  try {
+    var c = document.getElementById(canvasId);
+    if (!c) return;
+    var p = c.parentElement;
+    var pW = (p && p.clientWidth > 50) ? p.clientWidth : 800;
+    var pH = (p && p.clientHeight > 50) ? p.clientHeight : 200;
+    c.width = pW;
+    c.height = pH;
 
-  if (!data || data.length === 0) return;
+    var ctx = c.getContext('2d');
+    if (!ctx) return;
+    ctx.clearRect(0, 0, pW, pH);
 
-  var paddingLeft = 45;
-  var paddingBottom = 22;
-  var paddingTop = 14;
-  var paddingRight = 15;
-  var drawW = Math.max(10, pW - paddingLeft - paddingRight);
-  var drawH = Math.max(10, pH - paddingTop - paddingBottom);
-
-  var maxVal = 0;
-  for (var dv = 0; dv < data.length; dv++) {
-    var vNum = Number(data[dv]);
-    if (!isNaN(vNum) && isFinite(vNum) && vNum > maxVal) {
-      maxVal = vNum;
+    if (!data || data.length === 0) {
+      data = new Array(60).fill(0);
     }
-  }
-  var maxY = maxOverride || (maxVal > 0 ? Math.ceil(maxVal * 1.25) : 10);
-  if (!isFinite(maxY) || isNaN(maxY) || maxY < 5) maxY = 5;
 
-  // Grid & Y-Axis Numerical Labels
-  ctx.strokeStyle = 'rgba(51,65,85,0.35)';
-  ctx.lineWidth = 1;
-  ctx.fillStyle = '#94a3b8';
-  ctx.font = '10px "Fira Code", monospace';
-  ctx.textAlign = 'right';
+    var paddingLeft = 45;
+    var paddingBottom = 22;
+    var paddingTop = 14;
+    var paddingRight = 15;
+    var drawW = Math.max(10, pW - paddingLeft - paddingRight);
+    var drawH = Math.max(10, pH - paddingTop - paddingBottom);
 
-  var gridSteps = 4;
-  for (var i = 0; i <= gridSteps; i++) {
-    var val = Math.round(maxY * i / gridSteps);
-    var y = paddingTop + drawH - (drawH * i / gridSteps);
+    var maxVal = 0;
+    for (var i = 0; i < data.length; i++) {
+      var v = Number(data[i]);
+      if (!isNaN(v) && isFinite(v) && v > maxVal) maxVal = v;
+    }
+    var maxY = maxOverride || (maxVal > 0 ? Math.ceil(maxVal * 1.25) : 10);
+    if (!isFinite(maxY) || isNaN(maxY) || maxY < 5) maxY = 5;
 
-    // Grid line
+    // Draw Grid Lines & Labels
+    ctx.strokeStyle = 'rgba(51, 65, 85, 0.4)';
+    ctx.lineWidth = 1;
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '10px "Fira Code", monospace';
+    ctx.textAlign = 'right';
+
+    var gridSteps = 4;
+    for (var g = 0; g <= gridSteps; g++) {
+      var gVal = Math.round(maxY * g / gridSteps);
+      var gY = paddingTop + drawH - (drawH * g / gridSteps);
+
+      ctx.beginPath();
+      ctx.moveTo(paddingLeft, gY);
+      ctx.lineTo(pW - paddingRight, gY);
+      ctx.stroke();
+
+      ctx.fillText(fmt(gVal) + (unit ? ' ' + unit : ''), paddingLeft - 8, gY + 4);
+    }
+
+    // Time Labels
+    ctx.textAlign = 'center';
+    var timeLabels = ['-60s', '-45s', '-30s', '-15s', 'now'];
+    for (var t = 0; t < timeLabels.length; t++) {
+      var tX = paddingLeft + (drawW * t / (timeLabels.length - 1));
+      ctx.fillText(timeLabels[t], tX, pH - 4);
+    }
+
+    // Area Fill Gradient
+    var grad = ctx.createLinearGradient(0, paddingTop, 0, paddingTop + drawH);
+    grad.addColorStop(0, 'rgba(6, 182, 212, 0.25)');
+    grad.addColorStop(1, 'rgba(6, 182, 212, 0.0)');
+    ctx.fillStyle = grad;
+
     ctx.beginPath();
-    ctx.moveTo(paddingLeft, y);
-    ctx.lineTo(pW - paddingRight, y);
+    ctx.moveTo(paddingLeft, paddingTop + drawH);
+    for (var k = 0; k < data.length; k++) {
+      var kX = paddingLeft + (k / (data.length - 1)) * drawW;
+      var valK = Number(data[k]) || 0;
+      var kY = paddingTop + drawH - (valK / maxY) * drawH;
+      ctx.lineTo(kX, kY);
+    }
+    ctx.lineTo(paddingLeft + drawW, paddingTop + drawH);
+    ctx.closePath();
+    ctx.fill();
+
+    // Line Stroke
+    ctx.strokeStyle = strokeColor || '#06b6d4';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    for (var m = 0; m < data.length; m++) {
+      var mX = paddingLeft + (m / (data.length - 1)) * drawW;
+      var valM = Number(data[m]) || 0;
+      var mY = paddingTop + drawH - (valM / maxY) * drawH;
+      if (m === 0) ctx.moveTo(mX, mY);
+      else ctx.lineTo(mX, mY);
+    }
     ctx.stroke();
 
-    // Y-Axis Numerical Label
-    ctx.fillText(fmt(val) + (unit ? ' ' + unit : ''), paddingLeft - 8, y + 4);
+    // Dot at current value
+    var lastVal = Number(data[data.length - 1]) || 0;
+    var lastX = paddingLeft + drawW;
+    var lastY = paddingTop + drawH - (lastVal / maxY) * drawH;
+    ctx.fillStyle = strokeColor || '#06b6d4';
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+  } catch(e) {
+    console.error("drawLineChart error:", e);
   }
-
-  // X-Axis Time Labels
-  ctx.textAlign = 'center';
-  var timeLabels = ['-60s', '-45s', '-30s', '-15s', 'now'];
-  for (var j = 0; j < timeLabels.length; j++) {
-    var x = paddingLeft + (drawW * j / (timeLabels.length - 1));
-    ctx.fillText(timeLabels[j], x, pH - 4);
-  }
-
-  // Area Fill
-  var grad = ctx.createLinearGradient(0, paddingTop, 0, paddingTop + drawH);
-  var baseRgb = color.replace(')', '').replace('rgb(', '');
-  grad.addColorStop(0, 'rgba(' + baseRgb + ', 0.25)');
-  grad.addColorStop(1, 'rgba(' + baseRgb + ', 0.0)');
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.moveTo(paddingLeft, paddingTop + drawH);
-
-  for (var k = 0; k < data.length; k++) {
-    var kX = paddingLeft + (k / (data.length - 1)) * drawW;
-    var kY = paddingTop + drawH - (data[k] / maxY) * drawH;
-    ctx.lineTo(kX, kY);
-  }
-  ctx.lineTo(paddingLeft + drawW, paddingTop + drawH);
-  ctx.closePath();
-  ctx.fill();
-
-  // Line Stroke
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  for (var m = 0; m < data.length; m++) {
-    var mX = paddingLeft + (m / (data.length - 1)) * drawW;
-    var mY = paddingTop + drawH - (data[m] / maxY) * drawH;
-    if (m === 0) ctx.moveTo(mX, mY);
-    else ctx.lineTo(mX, mY);
-  }
-  ctx.stroke();
-
-  // Current latest value indicator badge
-  var lastVal = data[data.length - 1] || 0;
-  var lastX = paddingLeft + drawW;
-  var lastY = paddingTop + drawH - (lastVal / maxY) * drawH;
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(lastX, lastY, 4, 0, Math.PI * 2);
-  ctx.fill();
 }
 
 // ======================== DATA STATE ========================

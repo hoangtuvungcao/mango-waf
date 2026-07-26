@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os/exec"
 	"strings"
@@ -604,8 +605,33 @@ func (p *Pipeline) isBanned(ip string) bool {
 	return true
 }
 
+// isTrustedProxy checks if an IP belongs to trusted proxies (e.g. Cloudflare)
+func (p *Pipeline) isTrustedProxy(ipStr string) bool {
+	if ipStr == "" {
+		return false
+	}
+	parsedIP := net.ParseIP(ipStr)
+	if parsedIP == nil {
+		return false
+	}
+
+	for _, trusted := range p.cfg.Protection.TrustedProxies {
+		if trusted == ipStr {
+			return true
+		}
+		_, cidr, err := net.ParseCIDR(trusted)
+		if err == nil && cidr.Contains(parsedIP) {
+			return true
+		}
+	}
+	return false
+}
+
 // isWhitelisted checks if an IP is whitelisted (static or dynamic)
 func (p *Pipeline) isWhitelisted(ip string) bool {
+	if p.isTrustedProxy(ip) {
+		return true
+	}
 	// Check static whitelist from config
 	for _, w := range p.cfg.Protection.WhitelistIPs {
 		if ip == w {
@@ -628,6 +654,9 @@ func (p *Pipeline) isWhitelisted(ip string) bool {
 
 // CheckConnRate checks if an IP is opening connections too fast (CPS)
 func (p *Pipeline) CheckConnRate(ip string) bool {
+	if p.isTrustedProxy(ip) {
+		return true
+	}
 	state := p.getState(ip)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -650,12 +679,13 @@ func (p *Pipeline) CheckConnRate(ip string) bool {
 
 // BanIPLocal is called by engines locally to ban an IP and broadcast it to the mesh
 func (p *Pipeline) BanIPLocal(ip string, duration time.Duration) {
+	if p.isTrustedProxy(ip) || p.isWhitelisted(ip) {
+		logger.Info("Refusing to ban trusted proxy or whitelisted IP", "ip", ip)
+		return
+	}
 	p.banIP(ip, duration)
 
 	// Broadcast to cluster mesh
-	// Using a lightweight inline import or interface if possible,
-	// wait, we would need to import "mango-waf/cluster" in core/pipeline.go -> circular dependency!
-	// core depends on cluster? No, cluster depends on core? No, cluster only depends on config, logger. So we can import cluster in core!
 	if mesh := cluster.GetMesh(); mesh != nil {
 		mesh.BroadcastBan(ip, duration)
 	}
@@ -663,11 +693,18 @@ func (p *Pipeline) BanIPLocal(ip string, duration time.Duration) {
 
 // BanIPRemote is called by the Gossip network when another node bans an IP
 func (p *Pipeline) BanIPRemote(ip string, duration time.Duration) {
+	if p.isTrustedProxy(ip) || p.isWhitelisted(ip) {
+		return
+	}
 	p.banIP(ip, duration)
 }
 
 // banIP bans an IP for a duration with high-performance kernel-level blocking
 func (p *Pipeline) banIP(ip string, duration time.Duration) {
+	if p.isTrustedProxy(ip) || p.isWhitelisted(ip) {
+		logger.Info("Refusing to ban trusted proxy or whitelisted IP", "ip", ip)
+		return
+	}
 	if _, already := p.banned.LoadOrStore(ip, time.Now().Add(duration)); !already {
 		atomic.AddInt64(&p.shield.stats.BannedIPs, 1)
 	} else {
