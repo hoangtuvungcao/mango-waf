@@ -131,6 +131,10 @@ func (x *XDPManager) ensureAttached(cfg *config.Config) {
 		return
 	}
 
+	if !cfg.XDP.AutoAttach {
+		return
+	}
+
 	// Check if already attached to NIC
 	out, err := exec.Command("ip", "link", "show", "dev", nic).Output()
 	if err == nil && strings.Contains(string(out), "xdp") {

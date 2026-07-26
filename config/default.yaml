@@ -184,9 +184,9 @@ cluster:
   secret_key: "mangoshieldclustersecretkey32"
 
 xdp:
-  enabled: false
+  enabled: true
   interface: "eth0"
   mode: "skb"
   map_pin_path: "/sys/fs/bpf/mango_blacklist"
-  auto_compile: false
-  auto_attach: false
+  auto_compile: true
+  auto_attach: true
