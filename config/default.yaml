@@ -181,7 +181,7 @@ cluster:
   bind_port: 7946
   advertise_ip: ""
   join_peers: []
-  secret_key: "mangoshieldclustersecretkey32"
+  secret_key: "mangoshieldclustersecretkey32000"
 
 xdp:
   enabled: true

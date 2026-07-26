@@ -121,7 +121,13 @@ func InitMesh(cfg config.ClusterConfig, handleBan func(string, time.Duration), h
 		mCfg.AdvertiseAddr = cfg.AdvertiseIP
 	}
 	if cfg.SecretKey != "" {
-		mCfg.SecretKey = []byte(cfg.SecretKey) // AES-GCM 16, 24, or 32 bytes
+		key := []byte(cfg.SecretKey)
+		if len(key) != 16 && len(key) != 24 && len(key) != 32 {
+			padded := make([]byte, 32)
+			copy(padded, key)
+			key = padded
+		}
+		mCfg.SecretKey = key
 	}
 
 	n := &MeshNode{

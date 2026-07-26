@@ -56,8 +56,30 @@ func getEnv(key, fallback string) string {
 }
 
 func init() {
-	var initial []byte
-	lastJSON.Store(initial)
+	initialStats := map[string]interface{}{
+		"status":           "healthy",
+		"uptime":           "Active",
+		"hist_passed":      make([]uint64, 60),
+		"hist_blocked":     make([]uint64, 60),
+		"total_requests":   0,
+		"passed_requests":  0,
+		"blocked_requests": 0,
+		"current_rps":      0,
+		"peak_rps":         0,
+		"active_conns":     0,
+		"active_bans":      0,
+		"uptime_seconds":   1,
+		"is_under_attack":  false,
+		"cache_hits":       0,
+		"cache_misses":     0,
+		"cache_bypasses":   0,
+		"xdp_dropped_pkts": 0,
+		"xdp_enabled":      true,
+		"mesh_nodes":       1,
+		"mesh_members":     []interface{}{},
+	}
+	initialData, _ := json.Marshal(initialStats)
+	lastJSON.Store(initialData)
 	apiBaseURL = getEnv("MANGO_API_URL", "http://mango-shield:9090")
 }
 
@@ -146,6 +168,8 @@ func main() {
 	})
 	mux.HandleFunc("/api/dstat", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		if cached, ok := lastJSON.Load().([]byte); ok && len(cached) > 0 {
 			w.Write(cached)
 		} else {
@@ -154,6 +178,8 @@ func main() {
 	})
 	mux.HandleFunc("/api/system-stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		body, err := fetchAPI("/api/system-stats")
 		if err != nil {
 			w.Write([]byte(`{"error":"unavailable"}`))
@@ -163,6 +189,8 @@ func main() {
 	})
 	mux.HandleFunc("/api/rps-history", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 		body, err := fetchAPI("/api/rps-history")
 		if err != nil {
 			w.Write([]byte(`{"rps":[]}`))
@@ -632,7 +660,7 @@ body {
 
 <nav class="navbar">
   <div class="nav-inner">
-    <a class="nav-brand" href="#">
+    <a class="nav-brand" href="javascript:void(0)">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
       <span>MANGO SHIELD</span>
       <span class="nav-ver">v2.0</span>
@@ -912,6 +940,7 @@ window.submitAdminLogin = function(e) {
 document.addEventListener('click', function(e) {
   var t = e.target.closest('.nav-tab');
   if (!t) return;
+  if (e && e.preventDefault) e.preventDefault();
   var tabName = t.getAttribute('data-tab');
   if (!tabName) return;
 

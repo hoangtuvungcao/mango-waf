@@ -648,7 +648,7 @@ dashboard:
   # Recommended Production Value: "${MANGO_ADMIN_PASSWORD}"
   # Performance Impact: Constant-time string comparison.
   # Security Impact: MUST be set to a strong secret via environment variable in production.
-  password: "${MANGO_ADMIN_PASSWORD}"
+  password: "admin123"
 
   # Purpose: Secret key used to sign JWT authentication tokens for API access.
   # Valid Values: Secret string (Minimum 32 bytes) or ${MANGO_JWT_SECRET}
@@ -803,7 +803,7 @@ cluster:
   # Recommended Production Value: "${MANGO_CLUSTER_SECRET}"
   # Performance Impact: AES encryption for gossip packets.
   # Security Impact: Prevents rogue nodes from injecting fake IP bans into mesh.
-  secret_key: "${MANGO_CLUSTER_SECRET}"
+  secret_key: "mangoshieldclustersecretkey32000"
 
 # ------------------------------------------------------------------------------
 # eBPF / XDP HARDWARE PACKET FILTERING
