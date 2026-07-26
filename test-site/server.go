@@ -75,7 +75,7 @@ func init() {
 		"cache_bypasses":   0,
 		"xdp_dropped_pkts": 0,
 		"xdp_enabled":      true,
-		"mesh_nodes":       1,
+		"mesh_nodes":       2,
 		"mesh_members":     []interface{}{},
 	}
 	initialData, _ := json.Marshal(initialStats)
@@ -115,17 +115,7 @@ func fetchMetrics() {
 	for range ticker.C {
 		body, err := fetchAPI("/api/stats")
 		if err != nil {
-			localStats := map[string]interface{}{
-				"status":        "healthy",
-				"uptime":        "Active",
-				"hist_passed":   histPassed,
-				"hist_blocked":  histBlocked,
-				"total_requests": 0,
-				"passed_requests": 0,
-				"blocked_requests": 0,
-			}
-			data, _ := json.Marshal(localStats)
-			lastJSON.Store(data)
+			// Do not overwrite lastJSON with incomplete map if we already have valid stats stored
 			continue
 		}
 
@@ -666,14 +656,14 @@ body {
       <span class="nav-ver">v2.0</span>
     </a>
     <div class="nav-tabs" id="navTabs">
-      <button class="nav-tab active" data-tab="home">Home</button>
-      <button class="nav-tab" data-tab="dashboard">Dashboard</button>
-      <button class="nav-tab" data-tab="dstat">DSTAT</button>
-      <button class="nav-tab" data-tab="stats">Statistics</button>
-      <button class="nav-tab" data-tab="tests">Test Suite</button>
-      <button class="nav-tab" data-tab="cache">Cache</button>
-      <button class="nav-tab" data-tab="logs">Logs</button>
-      <button class="nav-tab" data-tab="settings">Settings</button>
+      <button class="nav-tab active" data-tab="home" onclick="switchTab('home')">Home</button>
+      <button class="nav-tab" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
+      <button class="nav-tab" data-tab="dstat" onclick="switchTab('dstat')">DSTAT</button>
+      <button class="nav-tab" data-tab="stats" onclick="switchTab('stats')">Statistics</button>
+      <button class="nav-tab" data-tab="tests" onclick="switchTab('tests')">Test Suite</button>
+      <button class="nav-tab" data-tab="cache" onclick="switchTab('cache')">Cache</button>
+      <button class="nav-tab" data-tab="logs" onclick="switchTab('logs')">Logs</button>
+      <button class="nav-tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
     </div>
     <div style="display:flex;align-items:center;gap:12px">
       <button class="admin-btn" id="adminBtn" onclick="toggleAdminModal()">
@@ -937,36 +927,49 @@ window.submitAdminLogin = function(e) {
 };
 
 // ======================== TAB NAVIGATION ========================
-document.addEventListener('click', function(e) {
-  var t = e.target.closest('.nav-tab');
-  if (!t) return;
-  if (e && e.preventDefault) e.preventDefault();
-  var tabName = t.getAttribute('data-tab');
+// ======================== TAB NAVIGATION ========================
+window.switchTab = function(tabName) {
   if (!tabName) return;
+  var tabs = document.querySelectorAll('.nav-tab');
+  tabs.forEach(function(x) {
+    var dt = x.getAttribute('data-tab');
+    if (dt === tabName) x.classList.add('active');
+    else x.classList.remove('active');
+  });
 
-  document.querySelectorAll('.nav-tab').forEach(function(x) { x.classList.remove('active'); });
-  document.querySelectorAll('.page').forEach(function(x) { x.classList.remove('active'); });
+  var pages = document.querySelectorAll('.page');
+  pages.forEach(function(x) {
+    if (x.id === 'page-' + tabName) x.classList.add('active');
+    else x.classList.remove('active');
+  });
 
-  t.classList.add('active');
-  var p = document.getElementById('page-' + tabName);
-  if (p) p.classList.add('active');
-
-  setTimeout(function() {
+  try {
     if (tabName === 'home') drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
     if (tabName === 'dstat') drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
     if (tabName === 'dashboard' || tabName === 'stats') {
       fetchStats();
       fetchSystemStats();
     }
-  }, 40);
+  } catch(err) {
+    console.error('Chart update error:', err);
+  }
+};
+
+document.addEventListener('click', function(e) {
+  var t = e.target ? e.target.closest('.nav-tab') : null;
+  if (!t) return;
+  if (e && e.preventDefault) e.preventDefault();
+  var tabName = t.getAttribute('data-tab');
+  if (tabName) window.switchTab(tabName);
 });
 
 // ======================== FORMATTERS ========================
 function fmt(n) {
-  if (n == null || isNaN(n)) return '--';
+  if (n === 0) return '0';
+  if (n == null || isNaN(n) || n === undefined) return '0';
   if (n >= 1e9) return (n/1e9).toFixed(1)+'B';
   if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
-  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  if (n >= 1e3) return (n/1e3).toFixed(0)+'K';
   return n.toString();
 }
 function fmtBytes(b) {
