@@ -438,16 +438,15 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
 		}
 		if s.challMgr != nil {
-			s.challMgr.ServeRateLimitPage(w, r, ip, 10)
+			s.challMgr.ServeChallenge(w, r, 2, 3)
 		} else {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Retry-After", "10")
-			w.Header().Set("X-Mango-Shield", "rate-limited")
-			w.WriteHeader(http.StatusTooManyRequests)
+			w.Header().Set("X-Mango-Shield", "blocked")
+			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(fmt.Sprintf(
-				"<html><body style='background:#111;color:#f90;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
-					"<h1>429 Too Many Requests</h1><p>Rate limit exceeded on Mango Shield.</p>"+
-					"<p style='color:#666;font-size:12px;'>IP: %s</p></body></html>",
+				"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
+					"<h1>403 Forbidden</h1><p>Access blocked by Mango Shield protection system.</p>"+
+					"<p style='color:#666;font-size:12px;'>Reason: Rate Limit Exceeded | IP: %s</p></body></html>",
 				ip,
 			)))
 		}
