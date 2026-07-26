@@ -156,6 +156,12 @@ func (x *XDPManager) ensureAttached(cfg *config.Config) {
 		}
 	}
 
+	// Safety check for primary host physical interface eth0
+	if (nic == "eth0" || nic == "ens3" || nic == "enp1s0") && os.Getenv("MANGO_XDP_HOST_ATTACH") != "true" {
+		logger.Info("XDP eBPF map active in zero-fork mode. Auto-attach to host primary NIC ("+nic+") skipped to preserve SSH/Cloudflare connectivity. (Set MANGO_XDP_HOST_ATTACH=true or run xdp/setup_xdp.sh to attach).", "interface", nic)
+		return
+	}
+
 	// Attach XDP object to NIC
 	if _, err := os.Stat(objFile); err == nil {
 		modeFlag := "xdpgeneric"
