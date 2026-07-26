@@ -228,20 +228,26 @@ func (s *Shield) Start() error {
 	}
 
 	s.httpServer = &http.Server{
-		Addr:           listenAddr,
-		Handler:        handler,
-		TLSConfig:      tlsConfig,
-		ReadTimeout:    s.cfg.Server.ReadTimeout,
-		WriteTimeout:   s.cfg.Server.WriteTimeout,
-		IdleTimeout:    s.cfg.Server.IdleTimeout,
-		MaxHeaderBytes: s.cfg.Server.MaxHeaderBytes,
+		Addr:              listenAddr,
+		Handler:           handler,
+		TLSConfig:         tlsConfig,
+		ReadTimeout:       s.cfg.Server.ReadTimeout,
+		WriteTimeout:      s.cfg.Server.WriteTimeout,
+		IdleTimeout:       s.cfg.Server.IdleTimeout,
+		ReadHeaderTimeout: 3 * time.Second,
+		MaxHeaderBytes:    s.cfg.Server.MaxHeaderBytes,
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			remoteAddr := conn.RemoteAddr().String()
 			ip, _, _ := net.SplitHostPort(remoteAddr)
 
 			switch state {
 			case http.StateNew:
-				atomic.AddInt64(&s.stats.ActiveConns, 1)
+				active := atomic.AddInt64(&s.stats.ActiveConns, 1)
+				if active > 8000 && !s.pipeline.isTrustedProxy(ip) {
+					atomic.AddInt64(&s.stats.ActiveConns, -1)
+					conn.Close()
+					return
+				}
 				// Do not apply socket-level CPS/Conn bans to trusted proxies (Cloudflare)
 				if s.pipeline.isTrustedProxy(ip) {
 					return

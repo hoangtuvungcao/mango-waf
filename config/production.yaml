@@ -304,11 +304,11 @@ protection:
 
   emergency:
     # Purpose: Total RPS threshold triggering Under-Attack Emergency Mode.
-    # Valid Values: 500 to 100000
-    # Recommended Production Value: 5000
+    # Valid Values: 100 to 100000
+    # Recommended Production Value: 300
     # Performance Impact: Swaps pipeline to strict verification mode.
     # Security Impact: Automatically activates strict challenges across all non-whitelisted traffic.
-    rps_threshold: 5000
+    rps_threshold: 300
 
     # Purpose: Duration to remain in Emergency Mode after RPS drops below threshold.
     # Valid Values: Go duration string ("5m", "10m", "30m")

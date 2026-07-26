@@ -196,10 +196,37 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 		}
 	}
 
-	// Layer 3.5: Rate Limiting (perf.IPRateLimiter — token bucket)
-	if p.rateLimiter != nil && p.cfg.Protection.RateLimit.Enabled {
-		if !p.rateLimiter.Allow(ip) {
+	// Layer 3.5: Rate Limiting & Anti-DDoS Volumetric Mitigation
+	if p.cfg.Protection.RateLimit.Enabled {
+		isUnderAttack := p.shield.stats.IsUnderAttack || atomic.LoadInt64(&p.shield.stats.CurrentRPS) > 200
+
+		// If under attack or high RPS surge, enforce strict anti-DDoS flood protection for unverified IPs
+		if isUnderAttack && !p.isWhitelisted(ip) {
+			state := p.getState(ip)
+			state.mu.Lock()
+			now := time.Now()
+			if now.Sub(state.ConnLastReset) >= time.Second {
+				state.RateLimitHits = 1
+				state.ConnLastReset = now
+			} else {
+				state.RateLimitHits++
+			}
+			hits := state.RateLimitHits
+			state.mu.Unlock()
+
+			if hits > 15 {
+				atomic.AddInt64(&p.shield.stats.BlockedRequests, 1)
+				if hits > 30 {
+					p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
+					return Action{Type: ActionDrop, Reason: "ddos_flood_drop"}
+				}
+				return Action{Type: ActionBlock, Reason: "ddos_flood_block"}
+			}
+		}
+
+		if p.rateLimiter != nil && !p.rateLimiter.Allow(ip) {
 			logger.Info("Rate limited", "ip", ip)
+			atomic.AddInt64(&p.shield.stats.BlockedRequests, 1)
 			state := p.getState(ip)
 			state.mu.Lock()
 			state.RateLimitHits++

@@ -64,7 +64,7 @@ protection:
     max_fails: 10
     use_iptables: true
   emergency:
-    rps_threshold: 5000
+    rps_threshold: 300
     duration: 10m
     auto_enable: true
 
