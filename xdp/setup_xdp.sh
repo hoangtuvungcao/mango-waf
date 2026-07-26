@@ -50,7 +50,9 @@ if [ -z "$NIC" ]; then
     echo "[!] Error: Could not detect network interface."
     exit 1
 fi
-sudo ip link set dev "$NIC" xdp obj mango_xdp.o sec xdp_mango
+sudo ip link set dev "$NIC" xdp off 2>/dev/null || true
+sudo ip link set dev "$NIC" xdpgeneric off 2>/dev/null || true
+sudo ip link set dev "$NIC" xdpgeneric obj mango_xdp.o sec xdp_mango
 
 echo "
 ===================================================
