@@ -75,6 +75,13 @@ func NewIntel(cfg *config.Config) *Intel {
 	return intel
 }
 
+// UpdateConfig updates configuration pointer live
+func (i *Intel) UpdateConfig(cfg *config.Config) {
+	if cfg != nil {
+		i.cfg = cfg
+	}
+}
+
 // Evaluate evaluates an IP's trust level through all intelligence layers
 func (i *Intel) Evaluate(ip string) *EvalResult {
 	start := time.Now()

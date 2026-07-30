@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"mango-waf/config"
 	"mango-waf/logger"
@@ -19,22 +20,48 @@ type Engine struct {
 	stats     EngineStats
 }
 
+// SetParanoiaLevel updates the WAF paranoia level dynamically
+func (e *Engine) SetParanoiaLevel(level int) {
+	if level < 1 {
+		level = 1
+	}
+	if level > 4 {
+		level = 4
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cfg != nil {
+		e.cfg.WAF.ParanoiaLevel = level
+	}
+}
+
+// UpdateConfig updates the rules engine configuration pointer
+func (e *Engine) UpdateConfig(cfg *config.Config) {
+	if cfg == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.cfg = cfg
+}
+
 // Rule represents a single WAF rule
 type Rule struct {
-	ID          string
-	Name        string
-	Description string
-	Category    string   // sqli, xss, rce, lfi, rfi, ssrf, dos, scanner, custom
-	Severity    string   // low, medium, high, critical
-	Phase       int      // 1=request_headers, 2=request_body, 3=response_headers, 4=response_body
-	Targets     []string // URL, ARGS, HEADERS, BODY, COOKIE, UA, METHOD
-	Operator    string   // rx (regex), eq, contains, beginsWith, endsWith, gt, lt
-	Pattern     string
-	Compiled    *regexp.Regexp
-	Action      string // block, log, challenge, drop
-	Enabled     bool
-	Tags        []string
-	Paranoia    int // 1-4 paranoia level
+	ID           string
+	Name         string
+	Description  string
+	Category     string   // sqli, xss, rce, lfi, rfi, ssrf, dos, scanner, custom
+	Severity     string   // low, medium, high, critical
+	Phase        int      // 1=request_headers, 2=request_body, 3=response_headers, 4=response_body
+	Targets      []string // URL, ARGS, HEADERS, BODY, COOKIE, UA, METHOD
+	Operator     string   // rx (regex), eq, contains, beginsWith, endsWith, gt, lt
+	Pattern      string
+	PatternLower string
+	Compiled     *regexp.Regexp
+	Action       string // block, log, challenge, drop
+	Enabled      bool
+	Tags         []string
+	Paranoia     int // 1-4 paranoia level
 }
 
 // MatchResult holds the result of a rule match
@@ -56,10 +83,10 @@ type InspectResult struct {
 
 // EngineStats tracks WAF engine statistics
 type EngineStats struct {
-	mu             sync.Mutex
 	TotalInspected int64
 	TotalBlocked   int64
 	TotalMatched   int64
+	statsMu        sync.Mutex
 	RuleHits       map[string]int64
 }
 
@@ -90,14 +117,17 @@ func (e *Engine) Inspect(r *http.Request) *InspectResult {
 	e.mu.RUnlock()
 
 	result := &InspectResult{
-		Matches: make([]MatchResult, 0),
+		Matches: make([]MatchResult, 0, 2),
 	}
 
-	e.stats.mu.Lock()
-	e.stats.TotalInspected++
-	e.stats.mu.Unlock()
+	atomic.AddInt64(&e.stats.TotalInspected, 1)
 
-	// Extract request data for inspection
+	// Fast bypass for framework static assets to prevent false-positive blocks
+	if strings.HasPrefix(r.URL.Path, "/_next/static/") || strings.HasSuffix(r.URL.Path, ".png") || strings.HasSuffix(r.URL.Path, ".jpg") || strings.HasSuffix(r.URL.Path, ".css") || strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".woff2") || strings.HasSuffix(r.URL.Path, ".svg") {
+		return result
+	}
+
+	// Zero-allocation request data wrapper
 	reqData := extractRequestData(r)
 
 	for _, rule := range rules {
@@ -113,10 +143,10 @@ func (e *Engine) Inspect(r *http.Request) *InspectResult {
 			result.Matches = append(result.Matches, match)
 			result.Score += severityScore(rule.Severity)
 
-			e.stats.mu.Lock()
-			e.stats.TotalMatched++
+			atomic.AddInt64(&e.stats.TotalMatched, 1)
+			e.stats.statsMu.Lock()
 			e.stats.RuleHits[rule.ID]++
-			e.stats.mu.Unlock()
+			e.stats.statsMu.Unlock()
 
 			if rule.Action == "block" || rule.Action == "drop" {
 				result.Blocked = true
@@ -127,114 +157,93 @@ func (e *Engine) Inspect(r *http.Request) *InspectResult {
 	}
 
 	if result.Blocked {
-		e.stats.mu.Lock()
-		e.stats.TotalBlocked++
-		e.stats.mu.Unlock()
+		atomic.AddInt64(&e.stats.TotalBlocked, 1)
 
-		logger.Warn("WAF blocked request",
-			"rule", result.TopRule,
-			"matches", len(result.Matches),
-			"score", result.Score,
-			"uri", r.RequestURI,
-		)
+		if atomic.LoadInt64(&e.stats.TotalInspected) < 50 {
+			logger.Warn("WAF blocked request",
+				"rule", result.TopRule,
+				"matches", len(result.Matches),
+				"score", result.Score,
+				"uri", r.RequestURI,
+			)
+		}
 	}
 
 	return result
 }
 
-// requestData holds extracted request data for inspection
+// requestData holds zero-allocation request data wrappers for inspection
 type requestData struct {
-	URL     string
-	Path    string
-	Query   string
-	Method  string
-	Headers map[string]string
-	Cookies map[string]string
-	UA      string
-	Body    string // first 8KB
-	Args    map[string]string
+	r      *http.Request
+	URL    string
+	Path   string
+	Query  string
+	Method string
+	UA     string
 }
 
 func extractRequestData(r *http.Request) *requestData {
-	rd := &requestData{
-		URL:     r.URL.String(),
-		Path:    r.URL.Path,
-		Query:   r.URL.RawQuery,
-		Method:  r.Method,
-		Headers: make(map[string]string),
-		Cookies: make(map[string]string),
-		Args:    make(map[string]string),
-		UA:      r.UserAgent(),
+	return &requestData{
+		r:      r,
+		URL:    r.URL.String(),
+		Path:   r.URL.Path,
+		Query:  r.URL.RawQuery,
+		Method: r.Method,
+		UA:     r.UserAgent(),
 	}
-
-	for k, v := range r.Header {
-		rd.Headers[strings.ToLower(k)] = strings.Join(v, ", ")
-	}
-
-	for _, c := range r.Cookies() {
-		rd.Cookies[c.Name] = c.Value
-	}
-
-	for k, v := range r.URL.Query() {
-		rd.Args[k] = strings.Join(v, ", ")
-	}
-
-	return rd
 }
 
-// matchRule checks a single rule against request data
+// matchRule checks a single rule against request data with zero map allocations
 func (e *Engine) matchRule(rule *Rule, rd *requestData) MatchResult {
 	for _, target := range rule.Targets {
-		values := getTargetValues(target, rd)
-		for _, val := range values {
-			if e.matchOperator(rule, val) {
-				return MatchResult{
-					Matched:    true,
-					Rule:       rule,
-					MatchedVal: truncate(val, 100),
-					Target:     target,
+		switch target {
+		case "URL":
+			if e.matchOperator(rule, rd.URL) {
+				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.URL, 100), Target: target}
+			}
+		case "PATH":
+			if e.matchOperator(rule, rd.Path) {
+				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.Path, 100), Target: target}
+			}
+		case "QUERY":
+			if e.matchOperator(rule, rd.Query) {
+				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.Query, 100), Target: target}
+			}
+		case "METHOD":
+			if e.matchOperator(rule, rd.Method) {
+				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.Method, 100), Target: target}
+			}
+		case "UA":
+			if e.matchOperator(rule, rd.UA) {
+				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.UA, 100), Target: target}
+			}
+		case "HEADERS":
+			for _, vals := range rd.r.Header {
+				for _, val := range vals {
+					if e.matchOperator(rule, val) {
+						return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(val, 100), Target: target}
+					}
+				}
+			}
+		case "ARGS":
+			if rd.Query != "" {
+				for _, vals := range rd.r.URL.Query() {
+					for _, val := range vals {
+						if e.matchOperator(rule, val) {
+							return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(val, 100), Target: target}
+						}
+					}
+				}
+			}
+		case "COOKIES":
+			for _, c := range rd.r.Cookies() {
+				if e.matchOperator(rule, c.Value) {
+					return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(c.Value, 100), Target: target}
 				}
 			}
 		}
 	}
 	return MatchResult{Matched: false}
-}
-
-func getTargetValues(target string, rd *requestData) []string {
-	switch target {
-	case "URL":
-		return []string{rd.URL}
-	case "PATH":
-		return []string{rd.Path}
-	case "QUERY":
-		return []string{rd.Query}
-	case "METHOD":
-		return []string{rd.Method}
-	case "UA":
-		return []string{rd.UA}
-	case "HEADERS":
-		vals := make([]string, 0, len(rd.Headers))
-		for _, v := range rd.Headers {
-			vals = append(vals, v)
-		}
-		return vals
-	case "ARGS":
-		vals := make([]string, 0, len(rd.Args))
-		for _, v := range rd.Args {
-			vals = append(vals, v)
-		}
-		return vals
-	case "COOKIES":
-		vals := make([]string, 0, len(rd.Cookies))
-		for _, v := range rd.Cookies {
-			vals = append(vals, v)
-		}
-		return vals
-	case "BODY":
-		return []string{rd.Body}
-	default:
-		return nil
-	}
 }
 
 func (e *Engine) matchOperator(rule *Rule, value string) bool {
@@ -250,13 +259,25 @@ func (e *Engine) matchOperator(rule *Rule, value string) bool {
 		}
 		return false
 	case "contains":
-		return strings.Contains(strings.ToLower(value), strings.ToLower(rule.Pattern))
+		pat := rule.PatternLower
+		if pat == "" {
+			pat = strings.ToLower(rule.Pattern)
+		}
+		return strings.Contains(strings.ToLower(value), pat)
 	case "eq":
 		return strings.EqualFold(value, rule.Pattern)
 	case "beginsWith":
-		return strings.HasPrefix(strings.ToLower(value), strings.ToLower(rule.Pattern))
+		pat := rule.PatternLower
+		if pat == "" {
+			pat = strings.ToLower(rule.Pattern)
+		}
+		return strings.HasPrefix(strings.ToLower(value), pat)
 	case "endsWith":
-		return strings.HasSuffix(strings.ToLower(value), strings.ToLower(rule.Pattern))
+		pat := rule.PatternLower
+		if pat == "" {
+			pat = strings.ToLower(rule.Pattern)
+		}
+		return strings.HasSuffix(strings.ToLower(value), pat)
 	default:
 		return false
 	}
@@ -264,7 +285,8 @@ func (e *Engine) matchOperator(rule *Rule, value string) bool {
 
 // AddRule adds a custom rule
 func (e *Engine) AddRule(rule *Rule) error {
-	if rule.Operator == "rx" && rule.Pattern != "" {
+	rule.PatternLower = strings.ToLower(rule.Pattern)
+	if (rule.Operator == "rx" || rule.Operator == "!rx") && rule.Pattern != "" {
 		compiled, err := regexp.Compile("(?i)" + rule.Pattern)
 		if err != nil {
 			return err
@@ -281,12 +303,10 @@ func (e *Engine) AddRule(rule *Rule) error {
 
 // GetStats returns engine stats
 func (e *Engine) GetStats() map[string]interface{} {
-	e.stats.mu.Lock()
-	defer e.stats.mu.Unlock()
 	return map[string]interface{}{
-		"total_inspected": e.stats.TotalInspected,
-		"total_blocked":   e.stats.TotalBlocked,
-		"total_matched":   e.stats.TotalMatched,
+		"total_inspected": atomic.LoadInt64(&e.stats.TotalInspected),
+		"total_blocked":   atomic.LoadInt64(&e.stats.TotalBlocked),
+		"total_matched":   atomic.LoadInt64(&e.stats.TotalMatched),
 		"rules_loaded":    len(e.rules),
 	}
 }

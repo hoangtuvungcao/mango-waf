@@ -42,25 +42,26 @@ type Action struct {
 
 // Pipeline is the request processing pipeline
 type Pipeline struct {
-	shield      *Shield
-	cfg         *config.Config
-	ipStates    sync.Map // map[string]*IPState
-	banned      sync.Map // map[string]time.Time
-	whitelist   sync.Map // map[string]time.Time
-	activeConns sync.Map // map[string]*int64
-	connCount   sync.Map // map[string]int
-	alerts      *AlertManager
-	intel       *intelligence.Intel
-	detEngine   *detection.Engine
-	behavior    *detection.BehaviorAnalyzer
-	botClass    *detection.BotClassifier
-	attackDet   *detection.AttackDetector
-	adaptive    *detection.AdaptiveLearner
-	wafEngine   *rules.Engine
-	rateLimiter *perf.IPRateLimiter
-	degrader    *perf.GracefulDegrader
-	validator   *perf.RequestValidator
-	xdpMgr      *XDPManager
+	shield        *Shield
+	cfg           *config.Config
+	domainModeMap map[string]string // domain -> protection_mode
+	ipStates      sync.Map          // map[string]*IPState
+	banned        sync.Map          // map[string]time.Time
+	whitelist     sync.Map          // map[string]time.Time
+	activeConns   sync.Map          // map[string]*int64
+	connCount     sync.Map          // map[string]int
+	alerts        *AlertManager
+	intel         *intelligence.Intel
+	detEngine     *detection.Engine
+	behavior      *detection.BehaviorAnalyzer
+	botClass      *detection.BotClassifier
+	attackDet     *detection.AttackDetector
+	adaptive      *detection.AdaptiveLearner
+	wafEngine     *rules.Engine
+	rateLimiter   *perf.IPRateLimiter
+	degrader      *perf.GracefulDegrader
+	validator     *perf.RequestValidator
+	xdpMgr        *XDPManager
 }
 
 // IPState tracks per-IP behavior
@@ -86,12 +87,43 @@ type IPState struct {
 
 // NewPipeline creates a new processing pipeline
 func NewPipeline(s *Shield) *Pipeline {
-	return &Pipeline{
-		shield: s,
-		cfg:    s.cfg,
-		alerts: NewAlertManager(s.cfg),
-		xdpMgr: NewXDPManager(s.cfg),
+	domainModeMap := make(map[string]string)
+	if s.cfg != nil {
+		for _, d := range s.cfg.Domains {
+			if d.ProtectionMode != "" {
+				domainModeMap[strings.ToLower(d.Name)] = d.ProtectionMode
+			}
+		}
 	}
+	p := &Pipeline{
+		shield:        s,
+		cfg:           s.cfg,
+		domainModeMap: domainModeMap,
+		alerts:        NewAlertManager(s.cfg),
+		xdpMgr:        NewXDPManager(s.cfg),
+	}
+	if mesh := cluster.GetMesh(); mesh != nil {
+		mesh.SetBanHandler(func(ip string, duration time.Duration) {
+			p.BanIPLocal(ip, duration)
+		})
+		mesh.SetUnbanHandler(func(ip string) {
+			if ip == "all" {
+				p.banned.Range(func(k, v interface{}) bool {
+					p.banned.Delete(k)
+					return true
+				})
+				if p.xdpMgr != nil && p.xdpMgr.Enabled {
+					p.xdpMgr.UnbanIP("all")
+				}
+			} else {
+				p.banned.Delete(ip)
+				if p.xdpMgr != nil && p.xdpMgr.Enabled {
+					p.xdpMgr.UnbanIP(ip)
+				}
+			}
+		})
+	}
+	return p
 }
 
 // GetAlerts returns the alert manager
@@ -102,6 +134,18 @@ func (p *Pipeline) GetAlerts() *AlertManager {
 // Process runs a request through the protection pipeline (no fingerprint)
 func (p *Pipeline) Process(r *http.Request, ip string) Action {
 	return p.ProcessWithFingerprint(r, ip, nil)
+}
+
+// resolveDomainMode returns the effective protection mode for the request's domain in O(1) time.
+func (p *Pipeline) resolveDomainMode(r *http.Request) string {
+	host := strings.ToLower(r.Host)
+	if idx := strings.LastIndex(host, ":"); idx > 0 {
+		host = host[:idx]
+	}
+	if mode, ok := p.domainModeMap[host]; ok {
+		return mode
+	}
+	return p.cfg.Protection.Mode
 }
 
 // ProcessWithFingerprint runs a request through the pipeline with TLS fingerprint data
@@ -116,10 +160,14 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 		if p.degrader == nil || !p.degrader.IsFeatureDisabled("waf_deep_inspect", p.shield.stats.CurrentRPS) {
 			wafResult := p.wafEngine.Inspect(r)
 			if wafResult.Blocked {
-				logger.Warn("WAF blocked malicious request", "ip", ip, "rule", wafResult.TopRule, "score", wafResult.Score, "uri", r.RequestURI)
-				if wafResult.Action == "drop" {
+				// Suppress heavy disk log I/O during high RPS attacks (>100 RPS)
+				if atomic.LoadInt64(&p.shield.stats.CurrentRPS) < 100 {
+					logger.Warn("WAF blocked malicious request", "ip", ip, "rule", wafResult.TopRule, "score", wafResult.Score, "uri", r.RequestURI)
+				}
+				// If under DDoS attack, push repeated WAF attackers directly to XDP eBPF NIC map
+				if p.shield.IsDomainUnderAttack(r.Host) && !p.isTrustedProxy(ip) {
 					p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
-					return Action{Type: ActionDrop, Reason: "waf:" + wafResult.TopRule}
+					return Action{Type: ActionDrop, Reason: "waf_attack_xdp:" + wafResult.TopRule}
 				}
 				return Action{Type: ActionBlock, Reason: "waf:" + wafResult.TopRule}
 			}
@@ -137,9 +185,10 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 	}
 
 	// Layer 0.5: Emergency mode
-	if p.shield.stats.IsUnderAttack && p.cfg.Protection.Emergency.AutoEnable {
+	if p.shield.IsDomainUnderAttack(r.Host) && p.cfg.Protection.Emergency.AutoEnable {
 		if !p.isWhitelisted(ip) {
-			if p.cfg.Protection.Mode == "emergency" {
+			domainMode := p.resolveDomainMode(r)
+			if domainMode == "emergency" || p.cfg.Protection.Mode == "emergency" {
 				return Action{Type: ActionBlock, Reason: "emergency_mode"}
 			}
 		}
@@ -186,8 +235,8 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 			return Action{Type: ActionBlock, Reason: "fp_malicious"}
 		}
 
-		// Trusted browser fingerprint → fast-track (skip challenge if not under attack)
-		if fp.IsTrusted() && !p.shield.stats.IsUnderAttack {
+		// Trusted browser fingerprint → fast-track (skip challenge if target domain is not under attack)
+		if fp.IsTrusted() && !p.shield.IsDomainUnderAttack(r.Host) {
 			return Action{Type: ActionAllow, Reason: "fp_trusted:" + fp.Composite.Verdict}
 		}
 
@@ -224,10 +273,12 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 
 	// Layer 3.5: Rate Limiting & Anti-DDoS Volumetric Mitigation
 	if p.cfg.Protection.RateLimit.Enabled {
-		isUnderAttack := p.shield.stats.IsUnderAttack || atomic.LoadInt64(&p.shield.stats.CurrentRPS) > 200
+		isUnderAttack := p.shield.IsDomainUnderAttack(r.Host) || (p.shield.GetDomainRPS(r.Host) > 200)
 
 		// If under attack or high RPS surge, enforce strict anti-DDoS flood protection for unverified IPs
-		if isUnderAttack && !p.isWhitelisted(ip) {
+		// NOTE: Exclude challenge verification POST submissions & allow enough burst (35 RPS) for legitimate browsers loading assets & PoW
+		isVerificationPost := r.Method == "POST" && r.FormValue("challenge_type") != ""
+		if isUnderAttack && !p.isWhitelisted(ip) && !isVerificationPost {
 			state := p.getState(ip)
 			state.mu.Lock()
 			now := time.Now()
@@ -242,11 +293,11 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 
 			if hits > 15 {
 				atomic.AddInt64(&p.shield.stats.BlockedRequests, 1)
-				if hits > 30 {
+				// Offload flood bot IP directly into NIC eBPF/XDP hardware map!
+				if !p.isTrustedProxy(ip) {
 					p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
-					return Action{Type: ActionDrop, Reason: "ddos_flood_drop"}
 				}
-				return Action{Type: ActionBlock, Reason: "ddos_flood_block"}
+				return Action{Type: ActionDrop, Reason: "ddos_flood_xdp"}
 			}
 		}
 
@@ -325,7 +376,11 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 			return Action{Type: ActionDrop, Reason: "bot:" + classResult.BotType}
 		}
 		if classResult.IsBot && classResult.Threat == "high" && !p.hasValidProof(r) {
-			return Action{Type: ActionChallenge, Reason: "bot_suspicious", Stage: 2, Difficulty: p.cfg.Protection.Challenge.PowDifficulty + 1}
+			diff := p.cfg.Protection.Challenge.PowDifficulty + 1
+			if diff > 4 {
+				diff = 4
+			}
+			return Action{Type: ActionChallenge, Reason: "bot_suspicious", Stage: 2, Difficulty: diff}
 		}
 	}
 
@@ -348,7 +403,8 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 	state := p.getState(ip)
 	p.updateRPS(state)
 
-	stage := p.determineStageWithFP(state, r, fp)
+	domainMode := p.resolveDomainMode(r)
+	stage := p.determineStageWithFP(state, r, fp, domainMode)
 
 	// Stage 4 triggers an immediate TCP Drop (no HTTP response sent) to save maximum network bandwidth/CPU.
 	if stage == 4 {
@@ -368,6 +424,9 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 			if fp != nil && fp.Composite.Total < 40 {
 				difficulty += 1
 			}
+		}
+		if difficulty > 4 {
+			difficulty = 4
 		}
 
 		// Adaptive learner difficulty adjustment
@@ -453,11 +512,12 @@ func (p *Pipeline) isBadUA(r *http.Request) bool {
 }
 
 // determineStageWithFP determines challenge stage with fingerprint awareness
-func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fingerprint.ConnectionFingerprint) int {
-	mode := p.cfg.Protection.Mode
+func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fingerprint.ConnectionFingerprint, domainMode string) int {
+	mode := domainMode
+	isDomainUnderAttack := p.shield.IsDomainUnderAttack(r.Host)
 
 	switch mode {
-	case "off":
+	case "off", "monitor":
 		return 0
 	case "silent":
 		if p.hasValidProof(r) {
@@ -479,6 +539,11 @@ func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fin
 			return 0
 		}
 		return 4 // Drop all unauthenticated traffic
+	case "under_attack":
+		if p.hasValidProof(r) {
+			return 0
+		}
+		return 2 // Strict PoW challenge for all unverified traffic
 	case "auto":
 		if p.hasValidProof(r) {
 			return 0
@@ -489,8 +554,6 @@ func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fin
 		threshold := int64(p.cfg.Protection.Emergency.RPSThreshold)
 
 		// 1. Extreme System Load (DDoS Tsunami)
-		//    - Maximize bandwidth saving: Drop worst offenders instantly (TCP Reset)
-		//    - Captcha for everyone else
 		if systemRPS > threshold*2 {
 			if state.RPS > limit*2 {
 				return 4 // Drop instantly
@@ -498,13 +561,11 @@ func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fin
 			return 2 // Turnstile Captcha
 		}
 
-		// 2. Security Checks inside auto mode are handled by Smart Per-IP logic below
-
-		// 3. Smart Per-IP Behavioral Analysis
+		// 2. Smart Per-IP Behavioral Analysis
 		if fp != nil {
 			switch {
 			case fp.Composite.Total >= 60: // High trust: known browsers
-				if p.shield.stats.IsUnderAttack {
+				if isDomainUnderAttack {
 					if state.RPS > limit*4 {
 						return 2 // Extremely high RPS during attack -> Captcha
 					}
@@ -522,7 +583,7 @@ func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fin
 				return 0
 
 			case fp.Composite.Total >= 30: // Medium trust: Incognito / Unknown but likely legit
-				if p.shield.stats.IsUnderAttack {
+				if isDomainUnderAttack {
 					if state.RPS > limit*2 {
 						return 2 // High RPS during attack -> Captcha
 					}
@@ -540,7 +601,7 @@ func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fin
 				return 0 // Seamless for normal browsing (Incognito Fix)
 
 			default: // Low trust: Score < 30 (Bots, automated scripts, or suspicious)
-				if p.shield.stats.IsUnderAttack {
+				if isDomainUnderAttack {
 					if state.RPS > limit {
 						return 2 // High RPS from suspicious source during attack -> Captcha
 					}
@@ -554,7 +615,7 @@ func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fin
 		}
 
 		// Fallback (no fingerprinting available yet)
-		if p.shield.stats.IsUnderAttack {
+		if isDomainUnderAttack {
 			if state.RPS > limit {
 				return 2 // Captcha during attack if RPS is high
 			}
@@ -646,6 +707,9 @@ func (p *Pipeline) DecrementConnCount(ip string) int {
 
 // isBanned checks if an IP is banned
 func (p *Pipeline) isBanned(ip string) bool {
+	if p.isTrustedProxy(ip) || p.isWhitelisted(ip) {
+		return false
+	}
 	v, ok := p.banned.Load(ip)
 	if !ok {
 		return false
@@ -707,7 +771,7 @@ func (p *Pipeline) isWhitelisted(ip string) bool {
 
 // CheckConnRate checks if an IP is opening connections too fast (CPS)
 func (p *Pipeline) CheckConnRate(ip string) bool {
-	if p.isTrustedProxy(ip) {
+	if p.isTrustedProxy(ip) || p.isWhitelisted(ip) {
 		return true
 	}
 	state := p.getState(ip)
@@ -723,8 +787,8 @@ func (p *Pipeline) CheckConnRate(ip string) bool {
 	}
 
 	// Connection Per Second (CPS) limit
-	// Default: 20 CPS is suspicious for a single IP address
-	if state.CPS > 20 {
+	// Allow 100 CPS for modern multi-socket parallel browser connections
+	if state.CPS > 100 {
 		return false
 	}
 	return true
@@ -786,6 +850,35 @@ func (p *Pipeline) banIP(ip string, duration time.Duration) {
 // WhitelistIP whitelists an IP for a duration
 func (p *Pipeline) WhitelistIP(ip string, duration time.Duration) {
 	p.whitelist.Store(ip, time.Now().Add(duration))
+}
+
+// UnbanIP unbans a specific IP address
+func (p *Pipeline) UnbanIP(ip string) {
+	p.banned.Delete(ip)
+	if p.xdpMgr != nil && p.xdpMgr.Enabled {
+		p.xdpMgr.UnbanIP(ip)
+	}
+	if mesh := cluster.GetMesh(); mesh != nil {
+		mesh.BroadcastUnban(ip)
+	}
+	logger.Info("IP manually unbanned", "ip", ip)
+}
+
+// UnbanAllIPs clears all banned IPs from memory and eBPF
+func (p *Pipeline) UnbanAllIPs() {
+	p.banned.Range(func(key, value interface{}) bool {
+		ipStr := key.(string)
+		p.banned.Delete(key)
+		if p.xdpMgr != nil && p.xdpMgr.Enabled {
+			p.xdpMgr.UnbanIP(ipStr)
+		}
+		return true
+	})
+	if mesh := cluster.GetMesh(); mesh != nil {
+		mesh.BroadcastUnban("all")
+	}
+	atomic.StoreInt64(&p.shield.stats.BannedIPs, 0)
+	logger.Info("All IPs unbanned")
 }
 
 // Cleanup removes expired entries

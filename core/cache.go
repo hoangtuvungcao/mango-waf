@@ -186,6 +186,10 @@ func (cm *CDNManager) Get(key string) (*CachedResponse, bool) {
 // Store saves a response to the cache
 func (cm *CDNManager) Store(key string, r *http.Request, resp *http.Response) error {
 	// 1. Check if we should cache this response
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
 	cacheControl := strings.ToLower(resp.Header.Get("Cache-Control"))
 
 	// Do not cache private, no-store, or no-cache responses
@@ -219,8 +223,8 @@ func (cm *CDNManager) Store(key string, r *http.Request, resp *http.Response) er
 	// Restore body for the original response to continue processing
 	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	// Max limit per item (e.g., 5MB)
-	if len(bodyBytes) > 5*1024*1024 {
+	// Max limit per item (e.g., 5MB) and ignore 0-byte empty bodies
+	if len(bodyBytes) == 0 || len(bodyBytes) > 5*1024*1024 {
 		return nil
 	}
 

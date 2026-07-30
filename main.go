@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,6 +55,23 @@ func main() {
 	}
 	fmt.Printf("  ✓ Cấu hình đã tải: %s\n", *configPath)
 
+	// Merge persistent dynamic domains from storage (data/mango_db.json)
+	st := api.GetStorage()
+	if st != nil && len(st.Data.Domains) > 0 {
+		domainMap := make(map[string]config.DomainConfig)
+		for _, d := range cfg.Domains {
+			domainMap[strings.ToLower(d.Name)] = d
+		}
+		for _, d := range st.Data.Domains {
+			domainMap[strings.ToLower(d.Name)] = d
+		}
+		mergedDomains := make([]config.DomainConfig, 0, len(domainMap))
+		for _, d := range domainMap {
+			mergedDomains = append(mergedDomains, d)
+		}
+		cfg.Domains = mergedDomains
+	}
+
 	// === 2. Initialize Logger ===
 	if err := logger.Init(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.File); err != nil {
 		fmt.Fprintf(os.Stderr, "[LỖI] Khởi tạo logger thất bại: %v\n", err)
@@ -62,9 +80,18 @@ func main() {
 	defer logger.Close()
 	fmt.Printf("  ✓ Logger khởi tạo: level=%s, format=%s\n", cfg.Logging.Level, cfg.Logging.Format)
 
-	// === 3. Configure Runtime ===
+	// === 3. Configure Runtime & Operating System Limits ===
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	fmt.Printf("  ✓ Runtime: GOMAXPROCS=%d\n", runtime.NumCPU())
+
+	var rLimit syscall.Rlimit
+	rLimit.Max = 100000
+	rLimit.Cur = 100000
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+		fmt.Printf("  ⚠️ RLIMIT_NOFILE warning: %v\n", err)
+	} else {
+		fmt.Println("  ✓ OS Socket Limit: RLIMIT_NOFILE set to 100,000 file descriptors")
+	}
 
 	// === 4. Initialize Fingerprint Engine ===
 	fingerprint.InitKnownBrowsers()
@@ -115,6 +142,14 @@ func main() {
 	defer um.Close()
 
 	shield := core.New(cfg)
+
+	// === Initialize Configuration Center (Single Source of Truth) ===
+	center := config.NewCenter(*configPath)
+	center.RegisterReloadHook(func(newCfg *config.Config) error {
+		shield.ReloadConfig(newCfg)
+		logger.Info("ConfigCenter: Hot-reloaded all WAF security engines successfully", "domains", len(newCfg.Domains))
+		return nil
+	})
 	shield.SetFingerprintStore(fpStore)
 	shield.SetIntel(intel)
 	shield.SetDetectionEngine(detEngine)
@@ -136,6 +171,15 @@ func main() {
 	}); err != nil {
 		logger.Warn("Failed to initialize Mango Mesh", "error", err)
 	} else if cfg.Cluster.Enabled {
+		if mesh := cluster.GetMesh(); mesh != nil {
+			mesh.SetUnbanHandler(func(ip string) {
+				if ip == "all" {
+					shield.GetPipeline().UnbanAllIPs()
+				} else {
+					shield.GetPipeline().UnbanIP(ip)
+				}
+			})
+		}
 		fmt.Printf("  ✓ Mango P2P Mesh enabled: Node %s (Port %d)\n", cfg.Cluster.NodeName, cfg.Cluster.BindPort)
 	}
 
@@ -171,6 +215,15 @@ func main() {
 					return []cluster.NodeInfo{}
 				}
 				return m.GetMembers()
+			},
+			UnbanFunc: func(ip string) {
+				shield.GetPipeline().UnbanIP(ip)
+			},
+			UnbanAll: func() {
+				shield.GetPipeline().UnbanAllIPs()
+			},
+			UpdateUpstreamFunc: func(domains []config.DomainConfig) {
+				shield.UpdateUpstreams(domains)
 			},
 		}
 		dashboard := api.NewDashboard(cfg, statsAdapter)

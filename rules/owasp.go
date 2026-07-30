@@ -3,6 +3,7 @@ package rules
 import (
 	"mango-waf/logger"
 	"regexp"
+	"strings"
 )
 
 // loadOWASPRules loads OWASP Core Rule Set inspired rules
@@ -271,6 +272,7 @@ func (e *Engine) loadOWASPRules(paranoiaLevel int) {
 
 	for _, rule := range owaspRules {
 		if rule.Paranoia <= paranoiaLevel {
+			rule.PatternLower = strings.ToLower(rule.Pattern)
 			if (rule.Operator == "rx" || rule.Operator == "!rx") && rule.Pattern != "" {
 				compiled, err := regexp.Compile("(?i)" + rule.Pattern)
 				if err != nil {

@@ -26,7 +26,7 @@ func GetEarlyRejectStats() (int64, int64) {
 		atomic.LoadInt64(&globalEarlyRejectStats.TotalRejected)
 }
 
-// SniffingListener wraps a net.Listener to perform early TLS fingerprint analysis
+// SniffingListener wraps a net.Listener to perform early TLS fingerprint analysis without blocking Accept()
 type SniffingListener struct {
 	net.Listener
 	Store         *FingerprintStore
@@ -34,7 +34,7 @@ type SniffingListener struct {
 	IsUnderAttack func() bool
 }
 
-// NewSniffingListener creates a listener that performs early TLS sniffing
+// NewSniffingListener creates a listener that performs early TLS sniffing lazily on worker goroutines
 func NewSniffingListener(inner net.Listener, store *FingerprintStore, isUnderAttack func() bool) *SniffingListener {
 	return &SniffingListener{
 		Listener:      inner,
@@ -44,7 +44,7 @@ func NewSniffingListener(inner net.Listener, store *FingerprintStore, isUnderAtt
 	}
 }
 
-// Accept implements net.Listener.Accept
+// Accept implements net.Listener.Accept - RETURNS IMMEDIATELY to prevent blocking incoming connection queue
 func (l *SniffingListener) Accept() (net.Conn, error) {
 	conn, err := l.Listener.Accept()
 	if err != nil {
@@ -53,92 +53,95 @@ func (l *SniffingListener) Accept() (net.Conn, error) {
 
 	atomic.AddInt64(&globalEarlyRejectStats.TotalProcessed, 1)
 
-	// Wrap connection to sniff first few bytes
-	return l.sniff(conn)
+	// Return Lazy Sniffing Connection wrapper to perform sniffing asynchronously on worker goroutine
+	return &SniffingConn{
+		Conn:     conn,
+		listener: l,
+	}, nil
 }
 
-func (l *SniffingListener) sniff(conn net.Conn) (net.Conn, error) {
-	// Set a short deadline for sniffing to prevent hanging connections
-	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+// SniffingConn lazily performs TLS ClientHello sniffing on first Read() in its own worker goroutine
+type SniffingConn struct {
+	net.Conn
+	listener *SniffingListener
+	reader   *bufio.Reader
+	sniffed  bool
+	sniffErr error
+}
 
-	// Use a peek-capable reader (custom implementation to avoid large allocations)
-	br := bufio.NewReaderSize(conn, 1024)
+func (c *SniffingConn) Read(b []byte) (n int, err error) {
+	if !c.sniffed {
+		c.sniffed = true
+		c.performSniff()
+	}
+	if c.sniffErr != nil {
+		return 0, c.sniffErr
+	}
+	if c.reader != nil {
+		return c.reader.Read(b)
+	}
+	return c.Conn.Read(b)
+}
 
-	// Peek at the first few bytes (TLS Record Header: 5 bytes)
+func (c *SniffingConn) Close() error {
+	return c.Conn.Close()
+}
+
+func (c *SniffingConn) performSniff() {
+	// Set a 2-second read deadline for peeking initial bytes on worker goroutine
+	c.Conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	br := bufio.NewReaderSize(c.Conn, 2048)
+
 	header, err := br.Peek(5)
+	c.Conn.SetReadDeadline(time.Time{})
+
 	if err != nil {
-		// If we can't even read 5 bytes, it might not be a valid connection
-		conn.SetReadDeadline(time.Time{})
-		return &BufferedConn{Conn: conn, Reader: br}, nil
-	}
-
-	// Reset deadline
-	conn.SetReadDeadline(time.Time{})
-
-	// Check if it's a TLS Handshake (0x16)
-	if header[0] != 0x16 {
-		return &BufferedConn{Conn: conn, Reader: br}, nil
-	}
-
-	// Expected length of the handshake record
-	recordLen := int(header[3])<<8 | int(header[4])
-	if recordLen > 0 && recordLen < 16384 {
-		// Peek at the body (recordLen + 5 header bytes)
-		// We limit our peek to 2KB to avoid excessive memory usage for large ClientHellos
-		peekSize := recordLen + 5
-		if peekSize > 2048 {
-			peekSize = 2048
+		if br.Buffered() > 0 {
+			c.reader = br
 		}
+		return
+	}
 
-		raw, err := br.Peek(peekSize)
-		if err == nil || err == io.EOF {
-			// Try to parse ClientHello specifically for JA3
-			fp, err := FullFingerprintFromRaw(raw)
-			if err == nil {
-				// Store the fingerprint early
-				l.Store.Store(conn.RemoteAddr().String(), &ConnectionFingerprint{
-					RemoteAddr: conn.RemoteAddr().String(),
-					JA3:        fp.JA3,
-					JA4:        fp.JA4,
-					Raw:        fp.ClientHello,
-				})
+	c.reader = br
 
-				// EARLY REJECT LOGIC
-				// If system is under attack and JA3 is a known malicious tool, drop NOW
-				if l.IsUnderAttack != nil && l.IsUnderAttack() {
-					db := GetDB()
-					info, ok := db.LookupJA3(fp.JA3.Hash)
+	// Check if TLS Handshake (0x16)
+	if header[0] == 0x16 {
+		recordLen := int(header[3])<<8 | int(header[4])
+		if recordLen > 0 && recordLen < 16384 {
+			peekSize := recordLen + 5
+			if peekSize > 2048 {
+				peekSize = 2048
+			}
 
-					// Rejection Threshold: Trust Score < 10 (Bot/Attack Tool)
-					if ok && info.TrustScore < 10 {
-						atomic.AddInt64(&globalEarlyRejectStats.TotalRejected, 1)
-						logger.Warn("TLS Early Reject triggered",
-							"ip", conn.RemoteAddr().String(),
-							"ja3", fp.JA3.Hash,
-							"tool", info.Name,
-							"score", info.TrustScore,
-						)
-						conn.Close()
-						return nil, fmt.Errorf("early reject: known attack tool")
+			raw, err := br.Peek(peekSize)
+			if err == nil || err == io.EOF {
+				fp, err := FullFingerprintFromRaw(raw)
+				if err == nil {
+					c.listener.Store.Store(c.Conn.RemoteAddr().String(), &ConnectionFingerprint{
+						RemoteAddr: c.Conn.RemoteAddr().String(),
+						JA3:        fp.JA3,
+						JA4:        fp.JA4,
+						Raw:        fp.ClientHello,
+					})
+
+					if c.listener.IsUnderAttack != nil && c.listener.IsUnderAttack() {
+						db := GetDB()
+						info, ok := db.LookupJA3(fp.JA3.Hash)
+						if ok && info.TrustScore < 10 {
+							atomic.AddInt64(&globalEarlyRejectStats.TotalRejected, 1)
+							logger.Warn("TLS Early Reject triggered",
+								"ip", c.Conn.RemoteAddr().String(),
+								"ja3", fp.JA3.Hash,
+								"tool", info.Name,
+								"score", info.TrustScore,
+							)
+							c.Conn.Close()
+							c.sniffErr = fmt.Errorf("early reject: known attack tool")
+							return
+						}
 					}
 				}
 			}
 		}
 	}
-
-	return &BufferedConn{Conn: conn, Reader: br}, nil
-}
-
-// BufferedConn wraps a net.Conn with a buffered reader to replay peeked bytes
-type BufferedConn struct {
-	net.Conn
-	Reader *bufio.Reader
-}
-
-func (c *BufferedConn) Read(b []byte) (n int, err error) {
-	return c.Reader.Read(b)
-}
-
-func (c *BufferedConn) Close() error {
-	return c.Conn.Close()
 }

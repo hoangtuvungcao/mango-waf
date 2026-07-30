@@ -10,9 +10,11 @@ services:
       - /tmp
       - /app/logs
     ports:
-      - "443:443"
+      - "443:443/tcp"
+      - "443:443/udp"
       - "80:80"
       - "9090:9090"
+      - "1234:1234"
       - "9100:9100"
       - "7946:7946/tcp"
       - "7946:7946/udp"
@@ -23,11 +25,19 @@ services:
       - /sys/fs/bpf:/sys/fs/bpf
     environment:
       - TZ=Asia/Ho_Chi_Minh
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+      - "mango-test-site:host-gateway"
+      - "test-site:host-gateway"
     cap_add:
       - NET_ADMIN
       - BPF
       - PERFMON
       - SYS_ADMIN
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
     networks:
       - shield-net
     healthcheck:
@@ -46,6 +56,7 @@ services:
       context: .
       dockerfile_inline: |
         FROM golang:1.24-alpine AS builder
+        ENV GOTOOLCHAIN=auto
         WORKDIR /app
         COPY go.mod go.sum ./
         RUN go mod download

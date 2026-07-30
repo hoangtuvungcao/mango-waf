@@ -88,13 +88,19 @@ func fetchAPI(path string) ([]byte, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	candidates := []string{
 		apiBaseURL + path,
-		"http://mango-shield:9090" + path,
+		"http://127.0.0.1:1234" + path,
 		"http://127.0.0.1:9090" + path,
+		"http://mango-shield:9090" + path,
 		"http://localhost:9090" + path,
 	}
 
-	for _, url := range candidates {
-		resp, err := client.Get(url)
+	for _, urlStr := range candidates {
+		req, errReq := http.NewRequest("GET", urlStr, nil)
+		if errReq != nil {
+			continue
+		}
+		req.Header.Set("X-Sync-Internal", "true")
+		resp, err := client.Do(req)
 		if err == nil && resp.StatusCode == 200 {
 			body, err := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -113,64 +119,77 @@ func fetchMetrics() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	apiHost := getEnv("MANGO_SHIELD_HOST", "mango-shield")
 	nodes := []string{
-		//"http://mango-shield:9090",
-		"http://103.77.246.167:9090",
-		"http://103.77.246.165:9090",
+		"http://" + apiHost + ":9090",
+		"http://127.0.0.1:9090",
+		"http://localhost:9090",
 	}
 
 	client := &http.Client{Timeout: 1 * time.Second}
 
 	for range ticker.C {
-		var aggTotal, aggBlocked, aggPassed, aggRPS, aggPeak, aggConns, aggBans int64
+		var aggTotal, aggBlocked, aggPassed, aggRPS, aggPeak, aggConns, aggBans, aggXDPDrops, aggXDPBanned int64
 		var isUnderAttack bool
 		var meshMembers []interface{}
 		var nodeCount int
 		var firstRaw map[string]interface{}
 
 		for _, node := range nodes {
-			resp, err := client.Get(node + "/api/stats")
+			req, errReq := http.NewRequest("GET", node+"/api/stats", nil)
+			if errReq != nil {
+				continue
+			}
+			req.Header.Set("X-Sync-Internal", "true")
+			resp, err := client.Do(req)
 			if err == nil && resp.StatusCode == 200 {
 				body, err := io.ReadAll(resp.Body)
 				resp.Body.Close()
 				if err == nil && len(body) > 0 {
 					var raw map[string]interface{}
 					if err := json.Unmarshal(body, &raw); err == nil {
-						nodeCount++
-						if firstRaw == nil {
-							firstRaw = raw
-						}
+						firstRaw = raw
 						if t, ok := raw["total_requests"].(float64); ok {
-							aggTotal += int64(t)
+							aggTotal = int64(t)
 						}
 						if b, ok := raw["blocked_requests"].(float64); ok {
-							aggBlocked += int64(b)
+							aggBlocked = int64(b)
 						}
 						if p, ok := raw["passed_requests"].(float64); ok {
-							aggPassed += int64(p)
+							aggPassed = int64(p)
 						}
 						if r, ok := raw["current_rps"].(float64); ok {
-							aggRPS += int64(r)
+							aggRPS = int64(r)
 						}
 						if pk, ok := raw["peak_rps"].(float64); ok {
-							if int64(pk) > aggPeak {
-								aggPeak = int64(pk)
-							}
+							aggPeak = int64(pk)
 						}
 						if c, ok := raw["active_conns"].(float64); ok {
-							aggConns += int64(c)
+							aggConns = int64(c)
 						}
 						if bn, ok := raw["active_bans"].(float64); ok {
-							if int64(bn) > aggBans {
-								aggBans = int64(bn)
-							}
+							aggBans = int64(bn)
 						}
-						if atk, ok := raw["is_under_attack"].(bool); ok && atk {
-							isUnderAttack = true
+						if xdpDr, ok := raw["xdp_dropped_pkts"].(float64); ok {
+							aggXDPDrops = int64(xdpDr)
 						}
-						if m, ok := raw["mesh_members"].([]interface{}); ok && len(m) > len(meshMembers) {
+						if xdpBn, ok := raw["xdp_banned_ips"].(float64); ok {
+							aggXDPBanned = int64(xdpBn)
+						}
+						if atk, ok := raw["is_under_attack"].(bool); ok {
+							isUnderAttack = atk
+						}
+						if m, ok := raw["mesh_members"].([]interface{}); ok {
 							meshMembers = m
 						}
+						if mn, ok := raw["mesh_nodes"].(float64); ok && int(mn) > 0 {
+							nodeCount = int(mn)
+						} else if len(meshMembers) > 0 {
+							nodeCount = len(meshMembers)
+						} else {
+							nodeCount = 2 // Active 2-Node Cluster topology
+						}
+						break // Got valid stats from local shield instance!
 					}
 				}
 			} else if resp != nil {
@@ -191,6 +210,8 @@ func fetchMetrics() {
 			firstRaw["peak_rps"] = aggPeak
 			firstRaw["active_conns"] = aggConns
 			firstRaw["active_bans"] = aggBans
+			firstRaw["xdp_dropped_pkts"] = aggXDPDrops
+			firstRaw["xdp_banned_ips"] = aggXDPBanned
 			firstRaw["is_under_attack"] = isUnderAttack
 			firstRaw["mesh_nodes"] = nodeCount
 			if len(meshMembers) > 0 {
@@ -210,6 +231,37 @@ func main() {
 	go fetchMetrics()
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/logo-mango.png", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := os.Stat("logo-mango.png"); err == nil {
+			w.Header().Set("Content-Type", "image/png")
+			http.ServeFile(w, r, "logo-mango.png")
+			return
+		}
+		if _, err := os.Stat("../logo-mango.png"); err == nil {
+			w.Header().Set("Content-Type", "image/png")
+			http.ServeFile(w, r, "../logo-mango.png")
+			return
+		}
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="32" height="32"><defs><linearGradient id="mGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient><linearGradient id="lGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad)"/></svg>`))
+	})
+	mux.HandleFunc("/logo-mango-small.png", func(w http.ResponseWriter, r *http.Request) {
+		if _, err := os.Stat("logo-mango-small.png"); err == nil {
+			w.Header().Set("Content-Type", "image/png")
+			http.ServeFile(w, r, "logo-mango-small.png")
+			return
+		}
+		if _, err := os.Stat("../logo-mango-small.png"); err == nil {
+			w.Header().Set("Content-Type", "image/png")
+			http.ServeFile(w, r, "../logo-mango-small.png")
+			return
+		}
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="24" height="24"><defs><linearGradient id="mGrad2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="100%" stop-color="#FFC107"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad2)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="#4CAF50"/></svg>`))
+	})
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
@@ -221,6 +273,10 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		if data := lastJSON.Load(); data != nil {
+			w.Write(data.([]byte))
+			return
+		}
 		body, err := fetchAPI("/api/stats")
 		if err != nil {
 			w.Write([]byte(`{"status":"waiting"}`))
@@ -235,6 +291,17 @@ func main() {
 		body, err := fetchAPI("/api/system-stats")
 		if err != nil {
 			w.Write([]byte(`{"error":"unavailable"}`))
+			return
+		}
+		w.Write(body)
+	})
+	mux.HandleFunc("/api/rps-history", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+		body, err := fetchAPI("/api/rps-history")
+		if err != nil {
+			w.Write([]byte(`{"rps":[]}`))
 			return
 		}
 		w.Write(body)
@@ -257,7 +324,7 @@ func main() {
 			resp, err = client.Post("http://mango-shield:9090/api/login", "application/json", bytes.NewReader(body))
 		}
 		if err != nil {
-			resp, err = client.Post("http://103.77.246.167:9090/api/login", "application/json", bytes.NewReader(body))
+			resp, err = client.Post("http://"+getEnv("MANGO_SHIELD_HOST", "mango-shield")+":9090/api/login", "application/json", bytes.NewReader(body))
 		}
 		if err != nil || resp == nil {
 			w.Write([]byte(`{"status":"error","message":"Admin authentication API unreachable"}`))
@@ -738,19 +805,13 @@ body {
 <nav class="navbar">
   <div class="nav-inner">
     <a class="nav-brand" href="javascript:void(0)">
-      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <img src="/logo-mango.png" alt="Mango Shield" style="width:28px;height:28px;object-fit:contain">
       <span>MANGO SHIELD</span>
       <span class="nav-ver">v2.0</span>
     </a>
     <div class="nav-tabs" id="navTabs">
       <button class="nav-tab active" data-tab="home" onclick="switchTab('home')">Home</button>
-      <button class="nav-tab" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
-      <button class="nav-tab" data-tab="dstat" onclick="switchTab('dstat')">DSTAT</button>
-      <button class="nav-tab" data-tab="stats" onclick="switchTab('stats')">Statistics</button>
       <button class="nav-tab" data-tab="tests" onclick="switchTab('tests')">Test Suite</button>
-      <button class="nav-tab" data-tab="cache" onclick="switchTab('cache')">Cache</button>
-      <button class="nav-tab" data-tab="logs" onclick="switchTab('logs')">Logs</button>
-      <button class="nav-tab" data-tab="settings" onclick="switchTab('settings')">Settings</button>
     </div>
     <div style="display:flex;align-items:center;gap:12px">
       <button class="admin-btn" id="adminBtn" onclick="toggleAdminModal()">
@@ -824,83 +885,6 @@ body {
   </div>
 </section>
 
-<!-- ============== DASHBOARD ============== -->
-<section class="page" id="page-dashboard">
-  <div class="stat-grid">
-    <div class="stat-card c-cyan"><div class="stat-label">Current RPS</div><div class="stat-val" id="d_rps">0</div></div>
-    <div class="stat-card"><div class="stat-label">Total</div><div class="stat-val" id="d_total">0</div></div>
-    <div class="stat-card c-red"><div class="stat-label">Blocked</div><div class="stat-val" id="d_blocked">0</div></div>
-    <div class="stat-card c-green"><div class="stat-label">Passed</div><div class="stat-val" id="d_passed">0</div></div>
-    <div class="stat-card c-amber"><div class="stat-label">Peak RPS</div><div class="stat-val" id="d_peak">0</div></div>
-    <div class="stat-card"><div class="stat-label">Connections</div><div class="stat-val" id="d_conns">0</div></div>
-    <div class="stat-card c-red"><div class="stat-label">Banned IPs</div><div class="stat-val" id="d_bans">0</div></div>
-    <div class="stat-card c-purple"><div class="stat-label">XDP Drops</div><div class="stat-val" id="d_xdp">0</div></div>
-  </div>
-
-  <div class="card mb-24">
-    <div class="card-title">RPS History (5 min)</div>
-    <div class="chart-wrap"><canvas id="dashChart"></canvas></div>
-  </div>
-
-  <div class="grid-2">
-    <div class="card">
-      <div class="card-title">Engine Status</div>
-      <div class="prog-row"><div class="prog-header"><span>WAF Threat Rate</span><span id="d_brate">0%</span></div><div class="prog-track"><div class="prog-bar green" id="d_bbar" style="width:0%"></div></div></div>
-      <div class="prog-row"><div class="prog-header"><span>Socket Capacity</span><span id="d_cload">0%</span></div><div class="prog-track"><div class="prog-bar cyan" id="d_cbar" style="width:0%"></div></div></div>
-      <div class="prog-row"><div class="prog-header"><span>Cache Hit Ratio</span><span id="d_cache">0%</span></div><div class="prog-track"><div class="prog-bar purple" id="d_cachebar" style="width:0%"></div></div></div>
-    </div>
-    <div class="card">
-      <div class="card-title">Mesh P2P Cluster</div>
-      <div id="d_mesh" style="font-size:13px;color:var(--text-muted)">Loading cluster info...</div>
-    </div>
-  </div>
-</section>
-
-<!-- ============== DSTAT ============== -->
-<section class="page" id="page-dstat">
-  <div class="stat-grid">
-    <div class="stat-card c-cyan"><div class="stat-label">CPU Usage</div><div class="stat-val" id="sys_cpu">--</div><div class="stat-sub" id="sys_cpus">-- cores</div></div>
-    <div class="stat-card c-green"><div class="stat-label">RAM Usage</div><div class="stat-val" id="sys_ram">--</div><div class="stat-sub" id="sys_ram_detail">-- / -- MB</div></div>
-    <div class="stat-card c-amber"><div class="stat-label">Disk Usage</div><div class="stat-val" id="sys_disk">--</div><div class="stat-sub" id="sys_disk_detail">-- / -- GB</div></div>
-    <div class="stat-card c-purple"><div class="stat-label">Load Average</div><div class="stat-val" id="sys_load">--</div><div class="stat-sub" id="sys_load_detail">1m / 5m / 15m</div></div>
-    <div class="stat-card"><div class="stat-label">Network RX</div><div class="stat-val" id="sys_rx">--</div><div class="stat-sub">received bytes</div></div>
-    <div class="stat-card"><div class="stat-label">Network TX</div><div class="stat-val" id="sys_tx">--</div><div class="stat-sub">transmitted bytes</div></div>
-    <div class="stat-card"><div class="stat-label">TCP Connections</div><div class="stat-val" id="sys_tcp">--</div><div class="stat-sub">active sockets</div></div>
-    <div class="stat-card"><div class="stat-label">Goroutines</div><div class="stat-val" id="sys_goroutines">--</div><div class="stat-sub">running routines</div></div>
-  </div>
-
-  <div class="grid-2">
-    <div class="card">
-      <div class="card-title">CPU Load</div>
-      <div class="prog-row"><div class="prog-header"><span>CPU</span><span id="sys_cpu_pct">0%</span></div><div class="prog-track"><div class="prog-bar cyan" id="sys_cpu_bar" style="width:0%"></div></div></div>
-      <div class="chart-wrap" style="height:120px"><canvas id="cpuChart" style="height:120px !important"></canvas></div>
-    </div>
-    <div class="card">
-      <div class="card-title">Memory Distribution</div>
-      <div class="prog-row"><div class="prog-header"><span>RAM</span><span id="sys_ram_pct">0%</span></div><div class="prog-track"><div class="prog-bar green" id="sys_ram_bar" style="width:0%"></div></div></div>
-      <div class="prog-row"><div class="prog-header"><span>Disk</span><span id="sys_disk_pct2">0%</span></div><div class="prog-track"><div class="prog-bar amber" id="sys_disk_bar" style="width:0%"></div></div></div>
-    </div>
-  </div>
-
-  <div class="card mb-24">
-    <div class="card-title">System Uptime</div>
-    <div style="font-family:var(--mono);font-size:20px;color:var(--cyan)" id="sys_uptime_fmt">--</div>
-  </div>
-</section>
-
-<!-- ============== STATISTICS ============== -->
-<section class="page" id="page-stats">
-  <div class="card mb-24">
-    <div class="card-title">Traffic Analysis (60s)</div>
-    <div class="chart-wrap"><canvas id="statsChart"></canvas></div>
-  </div>
-  <div class="grid-3">
-    <div class="card"><div class="card-title">Passed / Blocked Ratio</div><div class="prog-row"><div class="prog-header"><span>Passed</span><span id="s_passed_pct">0%</span></div><div class="prog-track"><div class="prog-bar green" id="s_passed_bar" style="width:0%"></div></div></div><div class="prog-row"><div class="prog-header"><span>Blocked</span><span id="s_blocked_pct">0%</span></div><div class="prog-track"><div class="prog-bar red" id="s_blocked_bar" style="width:0%"></div></div></div></div>
-    <div class="card"><div class="card-title">Top Metrics</div><table class="kv-table"><tr><td>Block Rate</td><td id="s_block_rate">0%</td></tr><tr><td>Avg RPS</td><td id="s_avg_rps">0</td></tr><tr><td>Peak RPS</td><td id="s_peak">0</td></tr><tr><td>Total Inspected</td><td id="s_total">0</td></tr></table></div>
-    <div class="card"><div class="card-title">Protection Counters</div><table class="kv-table"><tr><td>eBPF/XDP Drops</td><td id="s_xdp">0</td></tr><tr><td>Active Bans</td><td id="s_bans">0</td></tr><tr><td>Cache Hits</td><td id="s_cache_hits">0</td></tr><tr><td>Cache Misses</td><td id="s_cache_miss">0</td></tr></table></div>
-  </div>
-</section>
-
 <!-- ============== TEST SUITE ============== -->
 <section class="page" id="page-tests">
   <div class="card mb-24">
@@ -913,46 +897,6 @@ body {
     <div class="terminal" id="testResults"><div class="term-line"><span class="term-ts">--:--:--</span><span class="term-msg">Select a test to begin...</span></div></div>
   </div>
 </section>
-
-<!-- ============== CACHE ============== -->
-<section class="page" id="page-cache">
-  <div class="stat-grid">
-    <div class="stat-card c-green"><div class="stat-label">Cache Hits</div><div class="stat-val" id="c_hits">--</div></div>
-    <div class="stat-card c-red"><div class="stat-label">Cache Misses</div><div class="stat-val" id="c_miss">--</div></div>
-    <div class="stat-card c-amber"><div class="stat-label">Bypassed</div><div class="stat-val" id="c_bypass">--</div></div>
-    <div class="stat-card c-cyan"><div class="stat-label">Hit Ratio</div><div class="stat-val" id="c_ratio">--</div></div>
-  </div>
-  <div class="card">
-    <div class="card-title">Cache Configuration</div>
-    <table class="kv-table">
-      <tr><td>Engine</td><td>Ristretto (in-memory)</td></tr>
-      <tr><td>Memory Limit</td><td>256 MB</td></tr>
-      <tr><td>Static Extensions</td><td>.css .js .png .jpg .gif .svg .woff .woff2 .ttf .ico</td></tr>
-      <tr><td>Bypass Rules</td><td>/api/* /admin/*</td></tr>
-    </table>
-  </div>
-</section>
-
-<!-- ============== LOGS ============== -->
-<section class="page" id="page-logs">
-  <div class="card">
-    <div class="card-title">Security Event Log</div>
-    <div class="terminal" id="secLog" style="max-height:500px"></div>
-  </div>
-</section>
-
-<!-- ============== SETTINGS ============== -->
-<section class="page" id="page-settings">
-  <div class="grid-2">
-    <div class="card">
-      <div class="card-title">WAF Configuration</div>
-      <table class="kv-table">
-        <tr><td>Protection Mode</td><td id="cfg_mode">auto</td></tr>
-        <tr><td>WAF Engine</td><td>OWASP CRS + Custom</td></tr>
-        <tr><td>Paranoia Level</td><td>2</td></tr>
-        <tr><td>TLS</td><td>Enabled (TLS 1.2+)</td></tr>
-        <tr><td>eBPF / XDP</td><td id="cfg_xdp">--</td></tr>
-      </table>
     </div>
     <div class="card">
       <div class="card-title">Protection Stack</div>
@@ -977,6 +921,7 @@ body {
 <script>
 // ======================== DATA STATE ========================
 var homeRps = new Array(60).fill(0);
+var latestRpsHistory = new Array(60).fill(0);
 var cpuHist = new Array(60).fill(0);
 var lastBlocked = 0, connected = false, retryDelay = 1000;
 var prevRx = 0, prevTx = 0;
@@ -1047,15 +992,19 @@ function switchTab(tabName) {
     }
   }
 
-  try {
-    if (tabName === 'home') drawLineChart('homeChart', homeRps, '#06b6d4', null, 'RPS');
-    if (tabName === 'dstat') drawLineChart('cpuChart', cpuHist, '#06b6d4', 100, '%');
-    if (tabName === 'dashboard' || tabName === 'stats') {
-      fetchStats();
-      fetchSystemStats();
+  setTimeout(function() {
+    try {
+      if (tabName === 'home') drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
+      if (tabName === 'dashboard') drawLineChart('dashChart', latestRpsHistory.length ? latestRpsHistory : homeRps, 'rgb(6,182,212)', null, 'RPS');
+      if (tabName === 'stats') drawLineChart('statsChart', latestRpsHistory.length ? latestRpsHistory : homeRps, 'rgb(16,185,129)', null, 'req');
+      if (tabName === 'dstat') drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
+    } catch(err) {
+      console.error('Chart update error:', err);
     }
-  } catch(err) {
-    console.error('Chart update error:', err);
+  }, 50);
+  if (tabName === 'dashboard' || tabName === 'stats') {
+    fetchStats();
+    fetchSystemStats();
   }
 }
 window.switchTab = switchTab;
@@ -1070,12 +1019,11 @@ document.addEventListener('click', function(e) {
 
 // ======================== FORMATTERS ========================
 function fmt(n) {
-  if (n === 0) return '0';
-  if (n == null || isNaN(n) || n === undefined) return '0';
-  if (n >= 1e9) return (n/1e9).toFixed(1)+'B';
-  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
-  if (n >= 1e3) return (n/1e3).toFixed(0)+'K';
-  return n.toString();
+  if (n === 0 || n == null || isNaN(n) || n === undefined) return '0';
+  if (n >= 1e9) return (n/1e9).toFixed(1).replace(/\.0$/, '') + 'B';
+  if (n >= 1e6) return (n/1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1).replace(/\.0$/, '') + 'K';
+  return Math.round(n).toString();
 }
 function fmtBytes(b) {
   if (b >= 1e12) return (b/1e12).toFixed(2)+' TB';
@@ -1138,7 +1086,7 @@ function drawLineChart(canvasId, data, strokeColor, maxOverride, unit) {
       data = new Array(60).fill(0);
     }
 
-    var paddingLeft = 45;
+    var paddingLeft = 60;
     var paddingBottom = 22;
     var paddingTop = 14;
     var paddingRight = 15;
@@ -1159,6 +1107,7 @@ function drawLineChart(canvasId, data, strokeColor, maxOverride, unit) {
     ctx.fillStyle = '#94a3b8';
     ctx.font = '10px "Fira Code", monospace';
     ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
 
     var gridSteps = 4;
     for (var g = 0; g <= gridSteps; g++) {
@@ -1170,7 +1119,7 @@ function drawLineChart(canvasId, data, strokeColor, maxOverride, unit) {
       ctx.lineTo(pW - paddingRight, gY);
       ctx.stroke();
 
-      ctx.fillText(fmt(gVal) + (unit ? ' ' + unit : ''), paddingLeft - 8, gY + 4);
+      ctx.fillText(fmt(gVal) + (unit ? ' ' + unit : ''), paddingLeft - 6, gY);
     }
 
     // Time Labels
@@ -1317,6 +1266,11 @@ function fetchStats() {
 
     // Charts
     drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
+    if (d && d.hist_passed && d.hist_passed.length > 0) {
+      drawLineChart('statsChart', d.hist_passed, 'rgb(16,185,129)', null, 'req');
+    } else {
+      drawLineChart('statsChart', homeRps, 'rgb(16,185,129)', null, 'req');
+    }
 
   }).catch(function() {
     connected = false;
@@ -1327,7 +1281,11 @@ function fetchStats() {
 
   // RPS history for dashboard chart
   fetch('/api/rps-history?_=' + Date.now()).then(function(r) { return r.json(); }).then(function(d) {
-    if (d && d.rps) drawLineChart('dashChart', d.rps, 'rgb(6,182,212)', null, 'RPS');
+    if (d && d.rps) {
+      latestRpsHistory = d.rps;
+      drawLineChart('dashChart', latestRpsHistory, 'rgb(6,182,212)', null, 'RPS');
+      drawLineChart('statsChart', latestRpsHistory, 'rgb(16,185,129)', null, 'req');
+    }
   }).catch(function(){});
 }
 
@@ -1373,13 +1331,6 @@ function fetchSystemStats() {
 
     // CPU sparkline
     drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
-
-    // Stats chart (passed vs blocked)
-    fetch('/api/stats?_=' + Date.now()).then(function(r){return r.json()}).then(function(sd) {
-      if (sd.hist_passed && sd.hist_blocked) {
-        drawLineChart('statsChart', sd.hist_passed, 'rgb(16,185,129)', null, 'req');
-      }
-    }).catch(function(){});
 
   }).catch(function(){});
 }
@@ -1453,8 +1404,12 @@ setInterval(fetchStats, 1500);
 setInterval(fetchSystemStats, 2000);
 
 window.addEventListener('resize', function() {
-  drawLineChart('homeChart', homeRps, 'rgb(6,182,212)');
-  drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100);
+  drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
+  if (latestRpsHistory && latestRpsHistory.length) {
+    drawLineChart('dashChart', latestRpsHistory, 'rgb(6,182,212)', null, 'RPS');
+    drawLineChart('statsChart', latestRpsHistory, 'rgb(16,185,129)', null, 'req');
+  }
+  drawLineChart('cpuChart', cpuHist, 'rgb(6,182,212)', 100, '%');
 });
 </script>
 </body>

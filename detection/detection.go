@@ -2,6 +2,7 @@ package detection
 
 import (
 	"math"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -247,7 +248,11 @@ func (e *Engine) TrackSession(ip, url, ua string) *Session {
 
 	session.LastSeen = time.Now()
 	session.Requests++
-	session.UniqueURLs[url]++
+	if len(session.UniqueURLs) < 20 {
+		session.UniqueURLs[url]++
+	} else if _, exists := session.UniqueURLs[url]; exists {
+		session.UniqueURLs[url]++
+	}
 
 	if loaded {
 		// Analyze session behavior
@@ -325,15 +330,9 @@ func percentile(data []float64, p float64) float64 {
 	if len(data) == 0 {
 		return 0
 	}
-	// Simple estimation
 	sorted := make([]float64, len(data))
 	copy(sorted, data)
-	// Insertion sort for small data, good enough for this use
-	for i := 1; i < len(sorted); i++ {
-		for j := i; j > 0 && sorted[j-1] > sorted[j]; j-- {
-			sorted[j], sorted[j-1] = sorted[j-1], sorted[j]
-		}
-	}
+	slices.Sort(sorted)
 	idx := int(float64(len(sorted)-1) * p)
 	return sorted[idx]
 }

@@ -47,3 +47,6 @@ test-site/server.go.back
 # But usually we keep them if they are just examples with placeholders.
 # The user already replaced tokens with placeholders.
 server_linux
+test-site/test-site
+scratch/
+*.pprof

@@ -1,0 +1,137 @@
+# ==============================================================================
+# MANGO SHIELD WAF v2.0 — Production Direct-IP / Non-Cloudflare Configuration
+# Target: Direct Public Traffic (No Cloudflare Proxy)
+# Features: HTTP/3 (QUIC), TLS JA3/JA4 Fingerprinting, L7 Anti-DDoS, Dynamic WAF
+# ==============================================================================
+
+server:
+  listen: "0.0.0.0:443"
+  http_listen: "0.0.0.0:80"
+  read_timeout: 5s
+  write_timeout: 15s
+  idle_timeout: 30s
+  max_header_bytes: 1048576
+
+# ------------------------------------------------------------------------------
+# HTTP/3 (QUIC) UDP ENGINE
+# High-speed UDP QUIC protocol with Alt-Svc header advertisement
+# ------------------------------------------------------------------------------
+http3:
+  enabled: true
+  port: 443
+  alt_svc_header: true
+
+# ------------------------------------------------------------------------------
+# TLS / SSL ENGINE
+# ------------------------------------------------------------------------------
+tls:
+  enabled: true
+  cert_file: "certs/server.crt"
+  key_file: "certs/server.key"
+  auto_cert: false
+
+# ------------------------------------------------------------------------------
+# TLS FINGERPRINTING ENGINE (JA3 / JA4)
+# Direct Client Inspection (Active when not behind Cloudflare HTTPS proxy)
+# ------------------------------------------------------------------------------
+fingerprint:
+  ja3:
+    enabled: true
+    action: "log"
+  ja4:
+    enabled: true
+    action: "log"
+
+# ------------------------------------------------------------------------------
+# REVERSE PROXY TRANSPORT ENGINE
+# ------------------------------------------------------------------------------
+proxy:
+  connect_timeout: 3s
+  response_timeout: 5s
+  max_idle_conns: 50000
+  max_idle_conns_per_host: 10000
+  max_conns_per_host: 0
+  idle_conn_timeout: 60s
+  keep_alive: true
+  websocket: true
+  disable_compression: false
+  buffer_size_kb: 64
+
+# ------------------------------------------------------------------------------
+# PROTECTION PIPELINE & MITIGATION ENGINES
+# ------------------------------------------------------------------------------
+protection:
+  mode: "auto"
+  rate_limit:
+    enabled: true
+    requests_per_second: 200
+    burst: 500
+  connection_limit:
+    enabled: true
+    max_concurrent_per_ip: 150
+  challenge:
+    pow_difficulty: 3
+    cookie_ttl: 24h
+  auto_mitigation:
+    enabled: true
+    rps_threshold: 300
+    attack_mode: "under_attack"
+
+# ------------------------------------------------------------------------------
+# WAF RULES ENGINE (OWASP TOP 10)
+# ------------------------------------------------------------------------------
+waf:
+  enabled: true
+  paranoia_level: 1
+  sqli_protection: true
+  xss_protection: true
+  rce_protection: true
+  lfi_protection: true
+
+# ------------------------------------------------------------------------------
+# LOGGING ENGINE
+# ------------------------------------------------------------------------------
+logging:
+  level: "info"
+  format: "json"
+  file: "logs/mango-waf.log"
+
+# ------------------------------------------------------------------------------
+# METRICS & DASHBOARD
+# ------------------------------------------------------------------------------
+metrics:
+  enabled: true
+  port: 9090
+
+dashboard:
+  enabled: true
+  port: 9090
+  jwt_secret: "mango-shield-secret-key-change-in-production"
+
+# ------------------------------------------------------------------------------
+# CLUSTER MESH P2P
+# ------------------------------------------------------------------------------
+cluster:
+  enabled: true
+  node_name: "node-01"
+  bind_port: 7946
+  peers: []
+
+# ------------------------------------------------------------------------------
+# KERNEL eBPF / XDP ACCELERATION
+# ------------------------------------------------------------------------------
+xdp:
+  enabled: false
+  interface: "eth0"
+  mode: "skb"
+  map_pin_path: "/sys/fs/bpf/mango_blacklist"
+
+# ------------------------------------------------------------------------------
+# DOMAINS SPECIFIC CONFIGURATION
+# ------------------------------------------------------------------------------
+domains:
+  - name: "firewall.hidev.dev"
+    upstreams:
+      - "http://127.0.0.1:8080"
+    protection_mode: "auto"
+    ssl: true

@@ -31,6 +31,13 @@ type Config struct {
 	CDN          CDNConfig         `yaml:"cdn"`
 	Cluster      ClusterConfig     `yaml:"cluster"`
 	XDP          XDPConfig         `yaml:"xdp"`
+	HTTP3        HTTP3Config       `yaml:"http3"`
+}
+
+type HTTP3Config struct {
+	Enabled      bool `yaml:"enabled"`
+	Port         int  `yaml:"port"`
+	AltSvcHeader bool `yaml:"alt_svc_header"`
 }
 
 type ServerConfig struct {
@@ -52,9 +59,14 @@ type TLSConfig struct {
 }
 
 type DomainConfig struct {
-	Name      string           `yaml:"name"`
-	Upstreams []UpstreamConfig `yaml:"upstreams"`
-	SSL       bool             `yaml:"ssl"`
+	Name           string           `yaml:"name" json:"name"`
+	Upstreams      []UpstreamConfig `yaml:"upstreams" json:"upstreams"`
+	SSL            bool             `yaml:"ssl" json:"ssl"`
+	Owner          string           `yaml:"owner,omitempty" json:"owner,omitempty"`
+	RateLimitRPS   int              `yaml:"rate_limit_rps,omitempty" json:"rate_limit_rps,omitempty"`
+	RateLimitConn  int              `yaml:"rate_limit_conn,omitempty" json:"rate_limit_conn,omitempty"`
+	PoWDifficulty  int              `yaml:"pow_difficulty,omitempty" json:"pow_difficulty,omitempty"`
+	ProtectionMode string           `yaml:"protection_mode,omitempty" json:"protection_mode,omitempty"`
 }
 
 type UpstreamConfig struct {
@@ -63,11 +75,16 @@ type UpstreamConfig struct {
 }
 
 type ProxyConfig struct {
-	ConnectTimeout  time.Duration `yaml:"connect_timeout"`
-	ResponseTimeout time.Duration `yaml:"response_timeout"`
-	MaxIdleConns    int           `yaml:"max_idle_conns"`
-	KeepAlive       bool          `yaml:"keep_alive"`
-	WebSocket       bool          `yaml:"websocket"`
+	ConnectTimeout      time.Duration `yaml:"connect_timeout"`
+	ResponseTimeout     time.Duration `yaml:"response_timeout"`
+	MaxIdleConns        int           `yaml:"max_idle_conns"`
+	MaxIdleConnsPerHost int           `yaml:"max_idle_conns_per_host"`
+	MaxConnsPerHost     int           `yaml:"max_conns_per_host"`
+	IdleConnTimeout     time.Duration `yaml:"idle_conn_timeout"`
+	KeepAlive           bool          `yaml:"keep_alive"`
+	WebSocket           bool          `yaml:"websocket"`
+	DisableCompression  bool          `yaml:"disable_compression"`
+	BufferSizeKB        int           `yaml:"buffer_size_kb"`
 }
 
 type ProtectionConfig struct {
@@ -256,6 +273,7 @@ type ClusterConfig struct {
 	NodeName    string   `yaml:"node_name"`
 	BindPort    int      `yaml:"bind_port"`
 	AdvertiseIP string   `yaml:"advertise_ip"`
+	CNAMETarget string   `yaml:"cname_target"`
 	JoinPeers   []string `yaml:"join_peers"`
 	SecretKey   string   `yaml:"secret_key"`
 }
@@ -339,13 +357,22 @@ func setDefaults(cfg *Config) {
 		cfg.Server.MaxHeaderBytes = 65536
 	}
 	if cfg.Proxy.ConnectTimeout == 0 {
-		cfg.Proxy.ConnectTimeout = 10 * time.Second
+		cfg.Proxy.ConnectTimeout = 3 * time.Second
 	}
 	if cfg.Proxy.ResponseTimeout == 0 {
-		cfg.Proxy.ResponseTimeout = 60 * time.Second
+		cfg.Proxy.ResponseTimeout = 5 * time.Second
 	}
 	if cfg.Proxy.MaxIdleConns == 0 {
-		cfg.Proxy.MaxIdleConns = 100
+		cfg.Proxy.MaxIdleConns = 20000
+	}
+	if cfg.Proxy.MaxIdleConnsPerHost == 0 {
+		cfg.Proxy.MaxIdleConnsPerHost = 5000
+	}
+	if cfg.Proxy.IdleConnTimeout == 0 {
+		cfg.Proxy.IdleConnTimeout = 90 * time.Second
+	}
+	if cfg.Proxy.BufferSizeKB == 0 {
+		cfg.Proxy.BufferSizeKB = 64
 	}
 	if cfg.Protection.RateLimit.RequestsPerSecond == 0 {
 		cfg.Protection.RateLimit.RequestsPerSecond = 50
@@ -425,6 +452,9 @@ func setDefaults(cfg *Config) {
 	if cfg.XDP.MapPinPath == "" {
 		cfg.XDP.MapPinPath = "/sys/fs/bpf/mango_blacklist"
 	}
+	if cfg.HTTP3.Port == 0 {
+		cfg.HTTP3.Port = 443
+	}
 }
 
 func validate(cfg *Config) error {
@@ -444,9 +474,13 @@ func validate(cfg *Config) error {
 	}
 
 	// Validate protection mode enum
-	validModes := map[string]bool{"auto": true, "challenge": true, "captcha": true, "block": true, "monitor": true}
+	validModes := map[string]bool{
+		"auto": true, "challenge": true, "captcha": true, "block": true,
+		"monitor": true, "emergency": true, "off": true, "silent": true,
+		"under_attack": true,
+	}
 	if !validModes[strings.ToLower(cfg.Protection.Mode)] {
-		return fmt.Errorf("invalid protection mode '%s': must be auto, challenge, captcha, block, or monitor", cfg.Protection.Mode)
+		return fmt.Errorf("invalid protection mode '%s': must be auto, challenge, captcha, block, monitor, emergency, off, silent, or under_attack", cfg.Protection.Mode)
 	}
 
 	// Validate CIDRs in trusted_proxies

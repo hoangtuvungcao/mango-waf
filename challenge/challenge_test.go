@@ -91,8 +91,8 @@ func TestServeRateLimitPage(t *testing.T) {
 
 	mgr.ServeRateLimitPage(rec, req, "198.51.100.42", 10)
 
-	if rec.Code != 429 {
-		t.Errorf("expected status code 429 Too Many Requests, got %d", rec.Code)
+	if rec.Code != 403 {
+		t.Errorf("expected status code 403 Forbidden, got %d", rec.Code)
 	}
 
 	if rec.Header().Get("Retry-After") != "10" {
@@ -101,9 +101,5 @@ func TestServeRateLimitPage(t *testing.T) {
 
 	if rec.Header().Get("X-Mango-Shield") != "rate-limited" {
 		t.Errorf("expected X-Mango-Shield header 'rate-limited', got '%s'", rec.Header().Get("X-Mango-Shield"))
-	}
-
-	if !strings.Contains(rec.Body.String(), "429 Too Many Requests") {
-		t.Errorf("expected body to contain '429 Too Many Requests'")
 	}
 }

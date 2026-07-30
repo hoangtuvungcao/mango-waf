@@ -73,7 +73,7 @@ body {
 <div class="card">
   <div class="header">
     <div class="logo-box">
-      <svg class="logo-icon" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <img src="/logo-mango-small.png" alt="Mango Shield" style="width:32px;height:32px;object-fit:contain">
       <div class="brand-name">MANGO SHIELD</div>
     </div>
     <div class="badge">WAF v2.0</div>
@@ -230,7 +230,7 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
 <div class="card">
   <div class="header">
     <div class="logo-box">
-      <svg class="logo-icon" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <img src="/logo-mango-small.png" alt="Mango Shield" style="width:28px;height:28px;object-fit:contain">
       <div class="brand-name">MANGO SHIELD</div>
     </div>
     <div class="badge">WAF v2.0</div>
@@ -333,7 +333,7 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
 <div class="card">
   <div class="header">
     <div class="logo-box">
-      <svg class="logo-icon" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <img src="/logo-mango-small.png" alt="Mango Shield" style="width:32px;height:32px;object-fit:contain">
       <div class="brand-name">MANGO SHIELD</div>
     </div>
     <div class="badge-red">ACCESS BLOCKED</div>
@@ -400,7 +400,7 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
 <div class="card">
   <div class="header">
     <div class="logo-box">
-      <svg class="logo-icon" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <img src="/logo-mango-small.png" alt="Mango Shield" style="width:32px;height:32px;object-fit:contain">
       <div class="brand-name">MANGO SHIELD</div>
     </div>
     <div class="badge-amber">RATE LIMITED</div>
@@ -476,7 +476,7 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
 <div class="card">
   <div class="header">
     <div class="logo-box">
-      <svg class="logo-icon" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <img src="/logo-mango-small.png" alt="Mango Shield" style="width:32px;height:32px;object-fit:contain">
       <div class="brand-name">MANGO SHIELD</div>
     </div>
   </div>

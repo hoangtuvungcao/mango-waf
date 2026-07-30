@@ -1,7 +1,9 @@
 package core
 
 import (
+	"crypto/tls"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -41,7 +43,29 @@ func NewUpstreamManager(cfg *config.Config) *UpstreamManager {
 		stop:  make(chan struct{}),
 	}
 
-	for _, d := range cfg.Domains {
+	if cfg != nil {
+		um.UpdateDomains(cfg.Domains)
+	}
+
+	// Start background health checks
+	go um.healthCheckLoop()
+
+	return um
+}
+
+// UpdateDomains dynamically updates the upstream pools for all domains
+func (um *UpstreamManager) UpdateDomains(domains []config.DomainConfig) {
+	if um == nil {
+		return
+	}
+	um.mutex.Lock()
+	defer um.mutex.Unlock()
+
+	newPools := make(map[string]*UpstreamPool)
+	for _, d := range domains {
+		if d.Name == "" {
+			continue
+		}
 		domainName := strings.ToLower(d.Name)
 		pool := &UpstreamPool{
 			Backends: make([]*UpstreamBackend, 0, len(d.Upstreams)),
@@ -52,20 +76,16 @@ func NewUpstreamManager(cfg *config.Config) *UpstreamManager {
 			if weight <= 0 {
 				weight = 1
 			}
-			// By default, assume all backends are alive
 			pool.Backends = append(pool.Backends, &UpstreamBackend{
 				URL:     u.URL,
 				Weight:  weight,
 				IsAlive: true,
 			})
 		}
-		um.pools[domainName] = pool
+		newPools[domainName] = pool
 	}
-
-	// Start background health checks
-	go um.healthCheckLoop()
-
-	return um
+	um.pools = newPools
+	logger.Info("Upstream pools updated dynamically", "domains_count", len(newPools))
 }
 
 // GetNext returns the next available backend URL for a given host
@@ -77,24 +97,26 @@ func (um *UpstreamManager) GetNext(host string) (string, error) {
 
 	um.mutex.RLock()
 	var pool *UpstreamPool
-	for dName, p := range um.pools {
-		if strings.Contains(host, dName) {
-			pool = p
-			break
+	if p, ok := um.pools[host]; ok {
+		pool = p
+	} else {
+		for dName, p := range um.pools {
+			if strings.HasSuffix(host, "."+dName) || strings.Contains(host, dName) || strings.Contains(dName, host) {
+				pool = p
+				break
+			}
 		}
-	}
-
-	// Fallback to the first available pool if exactly 1 pool or if we have a default
-	if pool == nil && len(um.pools) > 0 {
-		for _, p := range um.pools {
-			pool = p
-			break
+		if pool == nil && len(um.pools) == 1 {
+			for _, p := range um.pools {
+				pool = p
+				break
+			}
 		}
 	}
 	um.mutex.RUnlock()
 
 	if pool == nil || len(pool.Backends) == 0 {
-		return "", errors.New("no upstream configured for this domain")
+		return "", fmt.Errorf("no upstream configured for host %s", host)
 	}
 
 	pool.Mutex.Lock()
@@ -132,8 +154,12 @@ func (um *UpstreamManager) healthCheckLoop() {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
 	client := &http.Client{
-		Timeout: 3 * time.Second,
+		Timeout:   3 * time.Second,
+		Transport: tr,
 	}
 
 	for {

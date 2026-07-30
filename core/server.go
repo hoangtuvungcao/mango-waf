@@ -14,11 +14,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
 	"mango-waf/challenge"
+	"mango-waf/cluster"
 	"mango-waf/config"
 	"mango-waf/detection"
 	"mango-waf/fingerprint"
@@ -26,43 +27,78 @@ import (
 	"mango-waf/logger"
 	"mango-waf/perf"
 	"mango-waf/rules"
+
+	"github.com/quic-go/quic-go/http3"
 )
 
 // Shield is the main Mango Shield server
 type Shield struct {
-	cfg            *config.Config
-	pipeline       *Pipeline
-	stats          *Stats
-	httpServer     *http.Server
-	redirectServer *http.Server
-	listener       net.Listener
-	fpStore        *fingerprint.FingerprintStore
-	challMgr       *challenge.Manager
-	intel          *intelligence.Intel
-	detEngine      *detection.Engine
-	behavior       *detection.BehaviorAnalyzer
-	botClass       *detection.BotClassifier
-	attackDet      *detection.AttackDetector
-	adaptive       *detection.AdaptiveLearner
-	wafEngine      *rules.Engine
-	rateLimiter    *perf.IPRateLimiter
-	degrader       *perf.GracefulDegrader
-	validator      *perf.RequestValidator
-	upstreams      *UpstreamManager
-	ctx            context.Context
-	cancel         context.CancelFunc
-	wg             sync.WaitGroup
+	cfg               *config.Config
+	pipeline          *Pipeline
+	stats             *Stats
+	httpServer        *http.Server
+	redirectServer    *http.Server
+	listener          net.Listener
+	fpStore           *fingerprint.FingerprintStore
+	challMgr          *challenge.Manager
+	intel             *intelligence.Intel
+	detEngine         *detection.Engine
+	behavior          *detection.BehaviorAnalyzer
+	botClass          *detection.BotClassifier
+	attackDet         *detection.AttackDetector
+	adaptive          *detection.AdaptiveLearner
+	wafEngine         *rules.Engine
+	rateLimiter       *perf.IPRateLimiter
+	degrader          *perf.GracefulDegrader
+	validator         *perf.RequestValidator
+	upstreams         *UpstreamManager
+	ctx               context.Context
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
+	domainReqs        sync.Map // domain -> *int64
+	domainLastReqs    sync.Map // domain -> int64
+	domainRPS         sync.Map // domain -> int64
+	domainUnderAttack sync.Map // domain -> bool
+	domainAttackStart sync.Map // domain -> time.Time
+	domainNormalCount sync.Map // domain -> int
+	configuredTransport *http.Transport
+	transportOnce       sync.Once
 }
 
 // Stats holds real-time statistics
+var fastUnixSec int64
+
+func init() {
+	atomic.StoreInt64(&fastUnixSec, time.Now().Unix())
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		for t := range ticker.C {
+			atomic.StoreInt64(&fastUnixSec, t.Unix())
+		}
+	}()
+}
+
+// GetFastCurrentUnixSec returns 0-syscall cached Unix timestamp
+func GetFastCurrentUnixSec() int64 {
+	return atomic.LoadInt64(&fastUnixSec)
+}
+
+// Stats tracks real-time traffic & security statistics with 64-byte Cache Line Alignment (Anti-False-Sharing)
 type Stats struct {
 	TotalRequests   int64
+	_               [56]byte
 	BlockedRequests int64
+	_               [56]byte
 	ChallengedReqs  int64
+	_               [56]byte
 	PassedRequests  int64
+	_               [56]byte
 	ActiveConns     int64
+	_               [56]byte
 	CurrentRPS      int64
+	_               [56]byte
 	PeakRPS         int64
+	_               [56]byte
 	BannedIPs       int64
 	WhitelistedIPs  int64
 	AttacksDetected int64
@@ -85,6 +121,10 @@ func New(cfg *config.Config) *Shield {
 		cancel:    cancel,
 	}
 	s.pipeline = NewPipeline(s)
+	s.challMgr.OnVerifySuccess = func(ip string) {
+		s.pipeline.UnbanIP(ip)
+	}
+	GetLogStore().SetRPSPointer(&s.stats.CurrentRPS)
 	return s
 }
 
@@ -152,6 +192,69 @@ func (s *Shield) GetPipeline() *Pipeline {
 	return s.pipeline
 }
 
+// UpdateUpstreams dynamically updates the upstream pools
+func (s *Shield) UpdateUpstreams(domains []config.DomainConfig) {
+	if s.upstreams != nil {
+		s.upstreams.UpdateDomains(domains)
+	}
+}
+
+// ReloadConfig applies live configuration updates instantly across all WAF protection modules
+func (s *Shield) ReloadConfig(newCfg *config.Config) {
+	if newCfg == nil {
+		return
+	}
+	s.cfg = newCfg
+	s.pipeline.cfg = newCfg
+
+	// Recompute O(1) domain protection mode map live
+	domainModeMap := make(map[string]string)
+	for _, d := range newCfg.Domains {
+		if d.ProtectionMode != "" {
+			domainModeMap[strings.ToLower(d.Name)] = d.ProtectionMode
+		}
+	}
+	s.pipeline.domainModeMap = domainModeMap
+
+	// Update Upstream Pools live
+	if s.upstreams != nil {
+		s.upstreams.UpdateDomains(newCfg.Domains)
+	}
+
+	// Update WAF Rules Engine Paranoia Level live
+	if s.wafEngine != nil {
+		s.wafEngine.SetParanoiaLevel(newCfg.WAF.ParanoiaLevel)
+	}
+
+	// Update IP Rate Limiter RPS & Burst live
+	if s.rateLimiter != nil {
+		s.rateLimiter.SetRate(
+			float64(newCfg.Protection.RateLimit.RequestsPerSecond),
+			float64(newCfg.Protection.RateLimit.Burst),
+		)
+	}
+
+	// Update Challenge Manager Config live
+	if s.challMgr != nil {
+		s.challMgr.UpdateConfig(newCfg)
+	}
+
+	// Update Intelligence Engine Config live
+	if s.intel != nil {
+		s.intel.UpdateConfig(newCfg)
+	}
+
+	logger.Info("WAF Security Policies & Configuration reloaded dynamically in real-time",
+		"mode", newCfg.Protection.Mode,
+		"paranoia", newCfg.WAF.ParanoiaLevel,
+		"rps", newCfg.Protection.RateLimit.RequestsPerSecond,
+		"burst", newCfg.Protection.RateLimit.Burst,
+		"pow_difficulty", newCfg.Protection.Challenge.PowDifficulty,
+		"block_datacenter", newCfg.Intelligence.ASN.BlockDatacenter,
+		"domains", len(newCfg.Domains),
+	)
+}
+
 // Start starts the Mango Shield server
 func (s *Shield) Start() error {
 	logger.Info("Mango Shield v2.0 starting",
@@ -186,17 +289,37 @@ func (s *Shield) Start() error {
 		if err := ensureTLSCertificates(s.cfg, certFile, keyFile); err != nil {
 			logger.Warn("Failed to ensure TLS certificates", "error", err)
 		}
+		var certs []tls.Certificate
 		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			return fmt.Errorf("load TLS cert: %w", err)
+		if err == nil {
+			certs = append(certs, cert)
 		}
+
+		// Dynamically load extra domain certs from certs/ directory (e.g. bacsycay.crt / bacsycay.key)
+		files, _ := os.ReadDir("certs")
+		for _, f := range files {
+			if strings.HasSuffix(f.Name(), ".crt") && f.Name() != "server.crt" {
+				base := strings.TrimSuffix(f.Name(), ".crt")
+				kFile := filepath.Join("certs", base+".key")
+				cFile := filepath.Join("certs", f.Name())
+				if _, errK := os.Stat(kFile); errK == nil {
+					if extraCert, errL := tls.LoadX509KeyPair(cFile, kFile); errL == nil {
+						certs = append(certs, extraCert)
+						logger.Info("Loaded extra TLS certificate", "cert", cFile)
+					}
+				}
+			}
+		}
+
 		minVer := uint16(tls.VersionTLS12)
 		if s.cfg.TLS.MinVersion == "1.3" {
 			minVer = tls.VersionTLS13
 		}
 		tlsConfig = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   minVer,
+			Certificates:           certs,
+			MinVersion:             minVer,
+			SessionTicketsDisabled: false,
+			ClientSessionCache:     tls.NewLRUClientSessionCache(10000),
 			CipherSuites: []uint16{
 				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
@@ -227,6 +350,25 @@ func (s *Shield) Start() error {
 		listenAddr = s.cfg.Server.HTTPListen
 	}
 
+	// Start HTTP/3 QUIC Server if enabled
+	if s.cfg.HTTP3.Enabled && s.cfg.TLS.Enabled && tlsConfig != nil {
+		h3Port := s.cfg.HTTP3.Port
+		if h3Port <= 0 {
+			h3Port = 443
+		}
+		h3Server := &http3.Server{
+			Addr:      fmt.Sprintf(":%d", h3Port),
+			Handler:   handler,
+			TLSConfig: tlsConfig,
+		}
+		go func() {
+			logger.Info("Starting HTTP/3 QUIC Server", "port", h3Port)
+			if err := h3Server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Warn("HTTP/3 QUIC Server error", "error", err)
+			}
+		}()
+	}
+
 	s.httpServer = &http.Server{
 		Addr:              listenAddr,
 		Handler:           handler,
@@ -234,23 +376,30 @@ func (s *Shield) Start() error {
 		ReadTimeout:       s.cfg.Server.ReadTimeout,
 		WriteTimeout:      s.cfg.Server.WriteTimeout,
 		IdleTimeout:       s.cfg.Server.IdleTimeout,
-		ReadHeaderTimeout: 3 * time.Second,
+		ReadHeaderTimeout: 1500 * time.Millisecond,
 		MaxHeaderBytes:    s.cfg.Server.MaxHeaderBytes,
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			remoteAddr := conn.RemoteAddr().String()
 			ip, _, _ := net.SplitHostPort(remoteAddr)
 
+			// Do not apply socket-level CPS/Conn bans to trusted proxies (Cloudflare)
+			if s.pipeline.isTrustedProxy(ip) {
+				if state == http.StateNew {
+					atomic.AddInt64(&s.stats.ActiveConns, 1)
+				} else if state == http.StateClosed || state == http.StateHijacked {
+					if atomic.LoadInt64(&s.stats.ActiveConns) > 0 {
+						atomic.AddInt64(&s.stats.ActiveConns, -1)
+					}
+				}
+				return
+			}
+
 			switch state {
 			case http.StateNew:
 				atomic.AddInt64(&s.stats.ActiveConns, 1)
-				// Do not apply socket-level CPS/Conn bans to trusted proxies (Cloudflare)
-				if s.pipeline.isTrustedProxy(ip) {
-					return
-				}
 
 				// CPS Protection
 				if !s.pipeline.CheckConnRate(ip) {
-					atomic.AddInt64(&s.stats.ActiveConns, -1)
 					s.pipeline.banIP(ip, s.cfg.Protection.Ban.Duration)
 					conn.Close()
 					return
@@ -259,13 +408,14 @@ func (s *Shield) Start() error {
 				// Concurrent Connection Limit
 				count := s.pipeline.IncrementConnCount(ip)
 				if count > s.cfg.Protection.ConnectionLimit.MaxPerIP {
-					atomic.AddInt64(&s.stats.ActiveConns, -1)
 					s.pipeline.banIP(ip, s.cfg.Protection.Ban.Duration)
 					conn.Close()
 					return
 				}
 			case http.StateClosed, http.StateHijacked:
-				atomic.AddInt64(&s.stats.ActiveConns, -1)
+				if atomic.LoadInt64(&s.stats.ActiveConns) > 0 {
+					atomic.AddInt64(&s.stats.ActiveConns, -1)
+				}
 				s.pipeline.DecrementConnCount(ip)
 			}
 		},
@@ -337,6 +487,41 @@ func (s *Shield) Stop() {
 	logger.Info("Mango Shield stopped")
 }
 
+// normalizeHost returns host without port and in lowercase
+func (s *Shield) normalizeHost(host string) string {
+	host = strings.ToLower(host)
+	if idx := strings.LastIndex(host, ":"); idx > 0 {
+		host = host[:idx]
+	}
+	return host
+}
+
+// IsDomainUnderAttack returns whether a specific domain is currently under attack
+func (s *Shield) IsDomainUnderAttack(host string) bool {
+	host = s.normalizeHost(host)
+	for _, d := range s.cfg.Domains {
+		dName := strings.ToLower(d.Name)
+		if host == dName || strings.HasSuffix(host, "."+dName) || strings.Contains(host, dName) {
+			if val, ok := s.domainUnderAttack.Load(dName); ok {
+				return val.(bool)
+			}
+		}
+	}
+	if val, ok := s.domainUnderAttack.Load(host); ok {
+		return val.(bool)
+	}
+	return false // Strict Per-Domain Isolation: other domains remain 100% unaffected when 1 domain is attacked
+}
+
+// GetDomainRPS returns current RPS for a domain
+func (s *Shield) GetDomainRPS(host string) int64 {
+	host = s.normalizeHost(host)
+	if v, ok := s.domainRPS.Load(host); ok {
+		return v.(int64)
+	}
+	return 0
+}
+
 // handleRequest is the main HTTP handler
 func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer func() {
@@ -346,16 +531,113 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	atomic.AddInt64(&s.stats.TotalRequests, 1)
+	if s.cfg.HTTP3.Enabled || s.cfg.HTTP3.AltSvcHeader {
+		h3Port := s.cfg.HTTP3.Port
+		if h3Port <= 0 {
+			h3Port = 443
+		}
+		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%d"; ma=86400`, h3Port))
+	}
+
+	// Exclude internal telemetry /api/ polling from request counters so dashboard polling doesn't inflate RPS charts
+	if !strings.HasPrefix(r.URL.Path, "/api/") {
+		atomic.AddInt64(&s.stats.TotalRequests, 1)
+
+		// Increment per-domain request counter
+		hostDomain := s.normalizeHost(r.Host)
+		v, _ := s.domainReqs.LoadOrStore(hostDomain, new(int64))
+		atomic.AddInt64(v.(*int64), 1)
+	}
 
 	// Extract client IP
 	ip := s.extractIP(r)
 
+	// Fast-path static logo asset serving with long-term immutable caching
+	if r.URL.Path == "/logo-mango.png" || r.URL.Path == "/logo-mango-small.png" || r.URL.Path == "/assets/logo-mango.png" {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Content-Type", "image/png")
+		if r.URL.Path == "/logo-mango-small.png" {
+			if _, err := os.Stat("logo-mango-small.png"); err == nil {
+				http.ServeFile(w, r, "logo-mango-small.png")
+				return
+			}
+		}
+		if _, err := os.Stat("logo-mango.png"); err == nil {
+			http.ServeFile(w, r, "logo-mango.png")
+			return
+		}
+	}
+
 	// Handle Challenge Form Verification BEFORE pipeline processing
 	if r.Method == "POST" && r.FormValue("challenge_type") != "" {
 		if s.challMgr.HandleVerification(w, r, ip) {
-			// Redirect cleanly back to the same page after successful verification
-			http.Redirect(w, r, r.URL.RequestURI(), http.StatusFound)
+			GetLogStore().RecordEvent("CHALLENGE", ip, r.Host, r.Method, r.URL.Path, http.StatusOK, "CHALLENGE_SOLVED", "PoW/Turnstile", "Browser security challenge solved successfully")
+			// Redirect cleanly back to the same page using StatusSeeOther (HTTP 303)
+			http.Redirect(w, r, r.URL.RequestURI(), http.StatusSeeOther)
+			return
+		}
+	}
+
+	// FAST-PATH: Verified human proof/session cookie (Zero-latency pass for clean verified visitors under DDoS)
+	if s.pipeline != nil && s.pipeline.hasValidProof(r) {
+		// Anti-Abuse Rate Limit: Enforce rate limit (Token Bucket) for verified users to prevent single-IP/session flooding (> 30-50 RPS)
+		if s.pipeline.detEngine != nil && s.pipeline.detEngine.CheckRateLimit(ip) {
+			atomic.AddInt64(&s.stats.BlockedRequests, 1)
+			GetLogStore().RecordEvent("SECURITY", ip, r.Host, r.Method, r.URL.Path, http.StatusTooManyRequests, "BLOCKED", "rate_limit", "Verified user exceeded RPS rate limit")
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("X-Mango-Shield", "rate-limited")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte("429 Too Many Requests - Verified Rate Limit Exceeded"))
+			return
+		}
+
+		// ALWAYS RUN WAF RULES INSPECTION (OWASP Top 10: SQLi, XSS, Path Traversal, RCE, Log4Shell) even for verified users
+		if s.pipeline.wafEngine != nil && s.cfg.WAF.Enabled {
+			wafResult := s.pipeline.wafEngine.Inspect(r)
+			if wafResult.Blocked {
+				atomic.AddInt64(&s.stats.BlockedRequests, 1)
+				GetLogStore().RecordEvent("EXPLOIT", ip, r.Host, r.Method, r.URL.Path, http.StatusForbidden, "BLOCKED", wafResult.TopRule, fmt.Sprintf("WAF %s exploit blocked (score %d)", wafResult.TopRule, wafResult.Score))
+				if s.challMgr != nil {
+					s.challMgr.ServeBlockPage(w, r, ip, "WAF Exploit Protection", wafResult.TopRule)
+				} else {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.Header().Set("X-Mango-Shield", "blocked")
+					w.WriteHeader(http.StatusForbidden)
+					w.Write([]byte("403 Forbidden - WAF Protection"))
+				}
+				return
+			}
+		}
+
+		atomic.AddInt64(&s.stats.PassedRequests, 1)
+		w.Header().Set("X-Mango-Shield", "verified-pass")
+		cdn := GetCDN()
+		if cdn != nil && cdn.ServeFromCache(w, r) {
+			return
+		}
+		if s.upstreams != nil {
+			s.proxyRequest(w, r)
+		} else {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Mango Shield v2.0 Active"))
+		}
+		return
+	}
+
+	// ALWAYS RUN WAF RULES INSPECTION FIRST (OWASP Top 10: SQLi, XSS, Path Traversal, RCE, Log4Shell)
+	if s.pipeline.wafEngine != nil && s.cfg.WAF.Enabled {
+		wafResult := s.pipeline.wafEngine.Inspect(r)
+		if wafResult.Blocked {
+			atomic.AddInt64(&s.stats.BlockedRequests, 1)
+			GetLogStore().RecordEvent("EXPLOIT", ip, r.Host, r.Method, r.URL.Path, http.StatusForbidden, "BLOCKED", wafResult.TopRule, fmt.Sprintf("WAF %s exploit blocked (score %d)", wafResult.TopRule, wafResult.Score))
+			if s.challMgr != nil {
+				s.challMgr.ServeBlockPage(w, r, ip, "WAF Exploit Protection", wafResult.TopRule)
+			} else {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("X-Mango-Shield", "blocked")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte("403 Forbidden - WAF Protection"))
+			}
 			return
 		}
 	}
@@ -381,6 +663,7 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	switch action.Type {
 	case ActionAllow:
 		atomic.AddInt64(&s.stats.PassedRequests, 1)
+		GetLogStore().RecordEvent("ACCESS", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusOK, "PASSED", "-", "Proxy pass to upstream")
 
 		// Seamless active user session cookie: issue cookie to active visitors so DDoS attacks never prompt them with Captcha!
 		if s.challMgr != nil && !s.pipeline.hasValidProof(r) {
@@ -403,14 +686,35 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("Mango Shield v2.0 Active (No Upstream Configured)"))
 		}
 
-	case ActionBlock:
+	case ActionChallenge:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
-		// Push banned IP straight down to NIC XDP eBPF BPF Map + Linux Kernel IPSet + P2P Mesh Cluster
-		if !s.pipeline.isTrustedProxy(ip) {
-			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
+		GetLogStore().RecordEvent("CHALLENGE", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusForbidden, "CHALLENGE_REQUIRED", fmt.Sprintf("STAGE_%d", action.Stage), fmt.Sprintf("Security challenge triggered: %s", action.Reason))
+		if s.challMgr != nil {
+			s.challMgr.ServeChallenge(w, r, action.Stage, action.Difficulty)
+		} else {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte("403 Challenge Required"))
+		}
+
+	case ActionBlock, ActionRateLimit, ActionDrop:
+		atomic.AddInt64(&s.stats.BlockedRequests, 1)
+		GetLogStore().RecordEvent("SECURITY", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusForbidden, "BLOCKED", action.Reason, fmt.Sprintf("Pipeline %v: %s", action.Type, action.Reason))
+		if action.Type == ActionDrop || action.Type == ActionRateLimit {
+			if !s.pipeline.isTrustedProxy(ip) {
+				s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
+			}
+		}
+		// Fast-path for high RPS attack surges (>100 RPS) to prevent CPU & rendering bottlenecks
+		if s.stats.IsUnderAttack || atomic.LoadInt64(&s.stats.CurrentRPS) > 100 {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("X-Mango-Shield", "blocked")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte("403 Forbidden - Mango Shield Protection"))
+			return
 		}
 		if s.challMgr != nil {
-			s.challMgr.ServeBlockPage(w, r, ip, "WAF Rule", action.Reason)
+			s.challMgr.ServeBlockPage(w, r, ip, "WAF Protection", action.Reason)
 		} else {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("X-Mango-Shield", "blocked")
@@ -422,69 +726,31 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 				action.Reason, ip,
 			)))
 		}
-
-	case ActionChallenge:
-		atomic.AddInt64(&s.stats.ChallengedReqs, 1)
-		if s.challMgr != nil {
-			s.challMgr.ServeChallenge(w, r, action.Stage, action.Difficulty)
-		} else {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("Challenge Required"))
-		}
-
-	case ActionRateLimit:
-		atomic.AddInt64(&s.stats.BlockedRequests, 1)
-		if !s.pipeline.isTrustedProxy(ip) {
-			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
-		}
-		if s.challMgr != nil {
-			s.challMgr.ServeChallenge(w, r, 2, 3)
-		} else {
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("X-Mango-Shield", "blocked")
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(fmt.Sprintf(
-				"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
-					"<h1>403 Forbidden</h1><p>Access blocked by Mango Shield protection system.</p>"+
-					"<p style='color:#666;font-size:12px;'>Reason: Rate Limit Exceeded | IP: %s</p></body></html>",
-				ip,
-			)))
-		}
-
-	case ActionDrop:
-		atomic.AddInt64(&s.stats.BlockedRequests, 1)
-		// Push banned IP straight down to NIC XDP eBPF BPF Map + Linux Kernel IPSet + P2P Mesh Cluster
-		if !s.pipeline.isTrustedProxy(ip) {
-			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration*2)
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("X-Mango-Shield", "dropped")
-		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte(fmt.Sprintf(
-			"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
-				"<h1>403 Forbidden</h1><p>Access dropped by Mango Shield eBPF protection system.</p>"+
-				"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
-			action.Reason, ip,
-		)))
 	}
 }
 
-// startHTTPRedirect starts HTTP to HTTPS redirect server
+// startHTTPRedirect starts HTTP to HTTPS redirect server (with Cloudflare Flexible SSL support)
 func (s *Shield) startHTTPRedirect() {
 	redirect := &http.Server{
 		Addr: s.cfg.Server.HTTPListen,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// If request comes via proxy/Cloudflare or already forwarded as HTTPS, handle directly to prevent loops
+			if r.Header.Get("CF-Connecting-IP") != "" || r.Header.Get("X-Forwarded-Proto") == "https" || strings.Contains(r.Header.Get("CF-Visitor"), "https") {
+				s.handleRequest(w, r)
+				return
+			}
 			target := "https://" + r.Host + r.URL.RequestURI()
 			http.Redirect(w, r, target, http.StatusMovedPermanently)
 		}),
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  30 * time.Second,
 	}
 	logger.Info("HTTP redirect server", "listen", s.cfg.Server.HTTPListen)
 	redirect.ListenAndServe()
 }
 
-// rpsCounter tracks requests per second
+// rpsCounter tracks requests per second globally and per domain
 func (s *Shield) rpsCounter() {
 	defer s.wg.Done()
 	var lastTotal int64
@@ -505,11 +771,26 @@ func (s *Shield) rpsCounter() {
 			if rps > peak {
 				atomic.StoreInt64(&s.stats.PeakRPS, rps)
 			}
+
+			// Calculate per-domain RPS
+			for _, d := range s.cfg.Domains {
+				dName := strings.ToLower(d.Name)
+				if v, ok := s.domainReqs.Load(dName); ok {
+					curr := atomic.LoadInt64(v.(*int64))
+					last := int64(0)
+					if l, ok2 := s.domainLastReqs.Load(dName); ok2 {
+						last = l.(int64)
+					}
+					dRPS := curr - last
+					s.domainLastReqs.Store(dName, curr)
+					s.domainRPS.Store(dName, dRPS)
+				}
+			}
 		}
 	}
 }
 
-// attackDetector monitors for attack conditions
+// attackDetector monitors for attack conditions globally and per-domain
 func (s *Shield) attackDetector() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(time.Second)
@@ -523,19 +804,83 @@ func (s *Shield) attackDetector() {
 			return
 		case <-ticker.C:
 			rps := atomic.LoadInt64(&s.stats.CurrentRPS)
-			threshold := int64(s.cfg.Protection.Emergency.RPSThreshold)
+			conns := atomic.LoadInt64(&s.stats.ActiveConns)
+			thresholdRPS := int64(s.cfg.Protection.Emergency.RPSThreshold)
+			if thresholdRPS == 0 {
+				thresholdRPS = 200
+			}
 
-			if rps > threshold {
+			// 1. Per-Domain Attack Detection with Mesh Aggregation
+			for _, d := range s.cfg.Domains {
+				dName := strings.ToLower(d.Name)
+				localRPS := s.GetDomainRPS(dName)
+				localConns := atomic.LoadInt64(&s.stats.ActiveConns)
+
+				totalClusterRPS := localRPS
+				totalClusterConns := localConns
+
+				if m := cluster.GetMesh(); m != nil {
+					m.BroadcastDomainMetric(dName, localRPS, localConns, false)
+					peerRPS, peerConns := m.GetPeerDomainMetrics(dName)
+					totalClusterRPS += peerRPS
+					totalClusterConns += peerConns
+				}
+
+				dThreshold := int64(d.RateLimitRPS)
+				if dThreshold <= 0 {
+					dThreshold = thresholdRPS
+				}
+
+				isDomainAttack := totalClusterRPS > dThreshold
+				isCurrentlyUnderAttack := false
+				if ua, ok := s.domainUnderAttack.Load(dName); ok {
+					isCurrentlyUnderAttack = ua.(bool)
+				}
+
+				if isDomainAttack {
+					s.domainNormalCount.Store(dName, 0)
+					if !isCurrentlyUnderAttack {
+						s.domainUnderAttack.Store(dName, true)
+						s.domainAttackStart.Store(dName, time.Now())
+						atomic.AddInt64(&s.stats.AttacksDetected, 1)
+						logger.Warn("ATTACK DETECTED ON DOMAIN (Cluster Aggregated)", "domain", dName, "total_cluster_rps", totalClusterRPS, "total_cluster_conns", totalClusterConns)
+						s.pipeline.alerts.SendDomainAttackStart(dName, totalClusterRPS, totalClusterConns)
+					}
+				} else if isCurrentlyUnderAttack {
+					nc := 0
+					if c, ok := s.domainNormalCount.Load(dName); ok {
+						nc = c.(int)
+					}
+					nc++
+					s.domainNormalCount.Store(dName, nc)
+					if nc >= 10 {
+						s.domainUnderAttack.Store(dName, false)
+						if m := cluster.GetMesh(); m != nil {
+							m.BroadcastDomainMetric(dName, 0, 0, true)
+						}
+						start := time.Now()
+						if st, ok := s.domainAttackStart.Load(dName); ok {
+							start = st.(time.Time)
+						}
+						duration := time.Since(start)
+						logger.Info("Domain attack ended", "domain", dName, "duration", duration.Round(time.Second))
+						s.pipeline.alerts.SendDomainAttackEnd(dName, duration, atomic.LoadInt64(&s.stats.BlockedRequests))
+						s.domainNormalCount.Store(dName, 0)
+					}
+				}
+			}
+
+			// 2. System-wide Extreme Overload Trigger
+			isSystemAttack := rps > thresholdRPS*2 || conns > 500
+
+			if isSystemAttack {
 				normalCount = 0
 				if !s.stats.IsUnderAttack {
 					s.stats.IsUnderAttack = true
 					s.stats.AttackStartTime = time.Now()
 					atomic.AddInt64(&s.stats.AttacksDetected, 1)
-					logger.Warn("ATTACK DETECTED",
-						"rps", rps,
-						"threshold", threshold,
-					)
-					s.pipeline.alerts.SendAttackStart(rps)
+					logger.Warn("SYSTEM EXTREME ATTACK DETECTED", "rps", rps, "conns", conns)
+					s.pipeline.alerts.SendAttackStart(rps, conns)
 				}
 			} else if s.stats.IsUnderAttack {
 				normalCount++
@@ -543,10 +888,7 @@ func (s *Shield) attackDetector() {
 					s.stats.IsUnderAttack = false
 					duration := time.Since(s.stats.AttackStartTime)
 					blocked := atomic.LoadInt64(&s.stats.BlockedRequests)
-					logger.Info("Attack ended",
-						"duration", duration.Round(time.Second),
-						"blocked", blocked,
-					)
+					logger.Info("System attack ended", "duration", duration.Round(time.Second), "blocked", blocked)
 					s.pipeline.alerts.SendAttackEnd(duration, blocked)
 					normalCount = 0
 				}
@@ -714,13 +1056,7 @@ func ensureTLSCertificates(cfg *config.Config, certFile, keyFile string) error {
 		keyFile = "certs/server.key"
 	}
 
-	_, certErr := os.Stat(certFile)
-	_, keyErr := os.Stat(keyFile)
-	if certErr == nil && keyErr == nil {
-		return nil // Both files exist
-	}
-
-	logger.Info("TLS certificate files missing, generating self-signed RSA certificate...", "cert", certFile, "key", keyFile)
+	logger.Info("Generating SAN TLS certificate for configured domains...", "cert", certFile)
 
 	_ = os.MkdirAll(filepath.Dir(certFile), 0755)
 	_ = os.MkdirAll(filepath.Dir(keyFile), 0755)
@@ -749,6 +1085,7 @@ func ensureTLSCertificates(cfg *config.Config, certFile, keyFile string) error {
 					commonName = d.Name
 				}
 				dnsMap[d.Name] = true
+				dnsMap["*."+d.Name] = true // Wildcard SAN for subdomains
 			}
 		}
 	}

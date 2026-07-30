@@ -18,8 +18,8 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		// Prevent clickjacking
 		h.Set("X-Frame-Options", "DENY")
 
-		// Strict transport security (1 year, includeSubDomains)
-		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+		// Force browsers to clear cached HSTS policy for self-signed certificate compatibility
+		h.Set("Strict-Transport-Security", "max-age=0")
 
 		// Referrer policy
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")

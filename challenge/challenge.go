@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mango-waf/config"
@@ -17,8 +18,10 @@ import (
 
 // Manager handles challenge serving and verification
 type Manager struct {
-	cfg    *config.Config
-	secret []byte
+	cfg             *config.Config
+	secret          []byte
+	verifiedIPs     sync.Map // ip -> time.Time (expiration)
+	OnVerifySuccess func(ip string)
 }
 
 // ChallengeType represents the type of challenge
@@ -32,12 +35,37 @@ const (
 
 // NewManager creates a new challenge manager
 func NewManager(cfg *config.Config) *Manager {
-	secret := []byte(cfg.Protection.Challenge.CookieSecret)
-	if len(secret) == 0 {
-		secret = make([]byte, 32)
-		rand.Read(secret)
+	secretStr := cfg.Protection.Challenge.CookieSecret
+	if secretStr == "" || strings.HasPrefix(secretStr, "${") {
+		secretStr = "mango-shield-enterprise-cookie-hmac-secret-v2-cluster-sync"
 	}
-	return &Manager{cfg: cfg, secret: secret}
+	secret := []byte(secretStr)
+	m := &Manager{
+		cfg:    cfg,
+		secret: secret,
+	}
+	go m.startEvictionWorker()
+	return m
+}
+
+// UpdateConfig updates configuration pointer live
+func (m *Manager) UpdateConfig(cfg *config.Config) {
+	if cfg != nil {
+		m.cfg = cfg
+	}
+}
+
+func (m *Manager) startEvictionWorker() {
+	ticker := time.NewTicker(10 * time.Minute)
+	for range ticker.C {
+		now := time.Now()
+		m.verifiedIPs.Range(func(key, value any) bool {
+			if expTime, ok := value.(time.Time); ok && now.After(expTime) {
+				m.verifiedIPs.Delete(key)
+			}
+			return true
+		})
+	}
 }
 
 // ServeChallenge serves the appropriate challenge page
@@ -54,8 +82,16 @@ func (m *Manager) ServeChallenge(w http.ResponseWriter, r *http.Request, stage i
 	}
 }
 
-// VerifyProof verifies a challenge proof cookie or active session cookie
+// VerifyProof verifies a challenge proof cookie or active session cookie or in-memory IP cache
 func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
+	// Fast-path 1: Check in-memory verified IP cache
+	if expVal, ok := m.verifiedIPs.Load(currentIP); ok {
+		if time.Now().Before(expVal.(time.Time)) {
+			return true
+		}
+		m.verifiedIPs.Delete(currentIP)
+	}
+
 	cookie, err := r.Cookie("mango_proof")
 	if err != nil || cookie.Value == "" {
 		cookie, err = r.Cookie("mango_session")
@@ -72,7 +108,7 @@ func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
 	payload := parts[0]
 	sig := parts[1]
 
-	// Verify HMAC
+	// Verify HMAC signature
 	mac := hmac.New(sha256.New, m.secret)
 	mac.Write([]byte(payload))
 	expected := hex.EncodeToString(mac.Sum(nil))
@@ -82,17 +118,17 @@ func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
 	}
 
 	// Check expiry (payload format: "ip_timestamp")
-	payloadParts := strings.SplitN(payload, "_", 2)
-	if len(payloadParts) == 2 {
-		cookieIP := payloadParts[0]
-		if cookieIP != currentIP {
-			return false
-		}
-
-		ts, err := strconv.ParseInt(payloadParts[1], 10, 64)
+	lastIdx := strings.LastIndex(payload, "_")
+	if lastIdx > 0 {
+		tsStr := payload[lastIdx+1:]
+		ts, err := strconv.ParseInt(tsStr, 10, 64)
 		if err == nil {
 			issued := time.Unix(ts, 0)
-			if time.Since(issued) > m.cfg.Protection.Challenge.CookieTTL {
+			ttl := m.cfg.Protection.Challenge.CookieTTL
+			if ttl <= 0 {
+				ttl = 1 * time.Hour
+			}
+			if time.Since(issued) > ttl {
 				return false // Expired
 			}
 		}
@@ -100,20 +136,36 @@ func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
 		return false
 	}
 
+	// Cache IP verification in memory for 1 hour so subsequent requests are fast-tracked 0ms
+	ttl := m.cfg.Protection.Challenge.CookieTTL
+	if ttl <= 0 {
+		ttl = 1 * time.Hour
+	}
+	m.verifiedIPs.Store(currentIP, time.Now().Add(ttl))
 	return true
 }
 
-// SetProofCookie sets a signed proof cookie
+// SetProofCookie sets a signed proof cookie and registers in-memory verified IP
 func (m *Manager) SetProofCookie(w http.ResponseWriter, r *http.Request, ip string) {
+	ttl := m.cfg.Protection.Challenge.CookieTTL
+	if ttl <= 0 {
+		ttl = 1 * time.Hour
+	}
+	m.verifiedIPs.Store(ip, time.Now().Add(ttl))
 	m.setCookieWithName(w, r, ip, "mango_proof")
 }
 
 // SetSessionCookie sets a signed seamless session cookie for active visitors
 func (m *Manager) SetSessionCookie(w http.ResponseWriter, r *http.Request, ip string) {
+	ttl := m.cfg.Protection.Challenge.CookieTTL
+	if ttl <= 0 {
+		ttl = 1 * time.Hour
+	}
+	m.verifiedIPs.Store(ip, time.Now().Add(ttl))
 	m.setCookieWithName(w, r, ip, "mango_session")
 }
 
-func (m *Manager) setCookieWithName(w http.ResponseWriter, r *http.Request, ip string, name string) {
+func (m *Manager) setCookieWithName(w http.ResponseWriter, _ *http.Request, ip string, name string) {
 	payload := fmt.Sprintf("%s_%d", ip, time.Now().Unix())
 
 	mac := hmac.New(sha256.New, m.secret)
@@ -127,7 +179,7 @@ func (m *Manager) setCookieWithName(w http.ResponseWriter, r *http.Request, ip s
 		MaxAge:   int(m.cfg.Protection.Challenge.CookieTTL.Seconds()),
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   m.cfg.TLS.Enabled,
+		Secure:   false, // Allow HTTP and HTTPS
 	}
 	http.SetCookie(w, cookie)
 }
@@ -157,7 +209,7 @@ func (m *Manager) verifyPoW(w http.ResponseWriter, r *http.Request, ip string) b
 	difficulty := r.FormValue("difficulty")
 
 	if nonce == "" || challenge == "" {
-		logger.Warn("PoW missing nonce or challenge", "nonce", nonce, "challenge", challenge)
+		logger.Debug("PoW missing nonce or challenge", "nonce", nonce, "challenge", challenge)
 		return false
 	}
 
@@ -173,12 +225,15 @@ func (m *Manager) verifyPoW(w http.ResponseWriter, r *http.Request, ip string) b
 
 	prefix := strings.Repeat("0", diffInt)
 	if !strings.HasPrefix(hashHex, prefix) {
-		logger.Warn("PoW hash prefix mismatch", "hash", hashHex, "expected_prefix", prefix)
+		logger.Debug("PoW hash prefix mismatch", "hash", hashHex, "expected_prefix", prefix)
 		return false
 	}
 
 	logger.Debug("PoW verified", "ip", ip, "difficulty", diffInt)
 	m.SetProofCookie(w, r, ip)
+	if m.OnVerifySuccess != nil {
+		m.OnVerifySuccess(ip)
+	}
 	return true
 }
 
@@ -189,14 +244,14 @@ func (m *Manager) verifyTurnstile(w http.ResponseWriter, r *http.Request, ip str
 	data := r.FormValue("t_data")
 
 	if tsStr == "" || hash == "" || data == "" {
-		logger.Warn("Turnstile missing fields", "ip", ip)
+		logger.Debug("Turnstile missing fields", "ip", ip)
 		return false
 	}
 
 	ts, err := strconv.ParseInt(tsStr, 10, 64)
 	diff := time.Now().Unix() - ts
 	if err != nil || diff < -10 || diff > 300 { // 5 minutes expiry, clock skew tolerance 10s
-		logger.Warn("Turnstile expired or invalid timestamp", "ip", ip)
+		logger.Debug("Turnstile expired or invalid timestamp", "ip", ip)
 		return false
 	}
 
@@ -205,7 +260,7 @@ func (m *Manager) verifyTurnstile(w http.ResponseWriter, r *http.Request, ip str
 	expected := hex.EncodeToString(mac.Sum(nil))
 
 	if !hmac.Equal([]byte(hash), []byte(expected)) {
-		logger.Warn("Turnstile hash mismatch", "ip", ip)
+		logger.Debug("Turnstile hash mismatch", "ip", ip)
 		return false
 	}
 
@@ -213,6 +268,9 @@ func (m *Manager) verifyTurnstile(w http.ResponseWriter, r *http.Request, ip str
 	// Simple bots scaling curl/python cannot generate this without full headless browsers.
 	logger.Debug("Turnstile verified", "ip", ip, "data_len", len(data))
 	m.SetProofCookie(w, r, ip)
+	if m.OnVerifySuccess != nil {
+		m.OnVerifySuccess(ip)
+	}
 	return true
 }
 
@@ -243,7 +301,7 @@ func (m *Manager) serveJSChallenge(w http.ResponseWriter, r *http.Request, diffi
 	html := fmt.Sprintf(powTemplate, r.Host, clientIP, rayID, challengeStr, difficulty, difficulty, r.URL.RequestURI())
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusForbidden)
 	w.Write([]byte(html))
 }
 
@@ -266,7 +324,7 @@ func (m *Manager) serveCAPTCHAChallenge(w http.ResponseWriter, r *http.Request) 
 	html := fmt.Sprintf(captchaTemplate, r.Host, r.URL.RequestURI(), ts, hash, clientIP, rayID)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusForbidden)
 	w.Write([]byte(html))
 }
 

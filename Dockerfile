@@ -1,6 +1,8 @@
 # Build stage
 FROM golang:1.24-alpine AS builder
 
+ENV GOTOOLCHAIN=auto
+
 RUN apk add --no-cache git ca-certificates tzdata
 
 WORKDIR /app
@@ -18,8 +20,7 @@ RUN apk add --no-cache ca-certificates tzdata iptables iproute2 clang llvm libbp
 WORKDIR /app
 
 COPY --from=builder /app/mango-shield .
-COPY --from=builder /app/config/default.yaml ./config/default.yaml
-COPY --from=builder /app/config/production.yaml ./config/production.yaml
+COPY --from=builder /app/config ./config
 COPY --from=builder /app/rules ./rules
 COPY --from=builder /app/xdp ./xdp
 COPY --from=builder /app/certs ./certs

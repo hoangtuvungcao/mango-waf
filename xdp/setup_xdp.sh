@@ -58,7 +58,7 @@ echo "
 ===================================================
 ✅ M A N G O   S H I E L D   --   X D P   A C T I V E
 ===================================================
-The Kernel-level packet filter (10M RPS) has been attached to interface \$NIC.
+The Kernel-level packet filter has been attached to interface \$NIC.
 
 To remove it, run:
   sudo ip link set dev \$NIC xdp off

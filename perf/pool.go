@@ -149,6 +149,18 @@ func (rl *IPRateLimiter) SetGlobalRate(rps float64) {
 	rl.rate = rps
 }
 
+// SetRate updates both rate and capacity dynamically
+func (rl *IPRateLimiter) SetRate(rps float64, burst float64) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	if rps > 0 {
+		rl.rate = rps
+	}
+	if burst > 0 {
+		rl.capacity = burst
+	}
+}
+
 func (rl *IPRateLimiter) cleanupLoop() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
