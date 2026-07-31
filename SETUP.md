@@ -1,28 +1,111 @@
-# 🛠️ HƯỚNG DẪN THIẾT LẬP VÀ VẬN HÀNH MANGO WAF v2.0 (ENTERPRISE SETUP GUIDE)
+# 🛠️ HƯỚNG DẪN CÀI ĐẶT & VẬN HÀNH MANGO WAF (ENTERPRISE BARE-METAL)
 
-Tài liệu này hướng dẫn chi tiết từ A-Z cách triển khai, tối ưu hóa hệ điều hành và cấu hình cụm máy chủ chống DDoS cho **Mango WAF v2.0**.
-
----
-
-## 📋 1. YÊU CẦU HỆ THỐNG (SYSTEM REQUIREMENTS)
-
-- **Hệ điều hành**: Linux (Ubuntu 22.04 LTS / 24.04 LTS, Debian 12, Rocky Linux 9).
-- **Phần cứng khuyến nghị (Per Node)**:
-  - **CPU**: 4 - 8 Cores.
-  - **RAM**: 4GB - 8GB.
-  - **Network Interface**: 1 Gbps / 10 Gbps NIC.
-- **Phần mềm bắt buộc**:
-  - Docker & Docker Compose Plugin.
-  - Go 1.24+ (nếu biên dịch thủ công).
-  - `clang`, `llvm`, `libbpf-dev` (để biên dịch eBPF/XDP).
+Tài liệu này hướng dẫn chi tiết từ A-Z cách thiết lập hệ thống môi trường, biên dịch mã nguồn thành Binary (File thực thi), cấu hình màng lọc XDP Kernel, thiết lập đồng bộ Mesh giữa các Node, và chạy test với cấu hình đầy đủ.
 
 ---
 
-## ⚙️ 2. TỐI ƯU HÓA HỆ ĐIỀU HÀNH LINUX KERNEL (OS TUNING)
+## 🚀 1. LẤY BẢN BUILD SẴN (PRE-BUILT BINARY)
+Nếu bạn không muốn tự biên dịch, Mango Shield cung cấp sẵn các file Binary đã được tối ưu hóa cho Linux (AMD64 / ARM64).
+*Cách lấy Binary:* Tải file `mango-waf-linux-amd64.tar.gz` mới nhất từ mục **Releases** trên GitHub, sau đó giải nén và cấp quyền thực thi:
+```bash
+tar -xzf mango-waf-linux-amd64.tar.gz
+chmod +x mango-shield
+./mango-shield -config=config.yaml
+```
 
-Để hệ thống chịu được lưu lượng tấn công lớn mà không bị nghẽn Socket hoặc chạm giới hạn File Descriptor của OS:
+---
 
-Khởi chạy script tự động tối ưu rlimit và sysctl:
+## 📦 2. CÀI ĐẶT MÔI TRƯỜNG & DEPENDENCIES (MODULE PACKAGES)
+Để chạy và biên dịch eBPF/XDP cũng như mã nguồn Go từ đầu, bạn cần cài đặt đầy đủ các gói thư viện và công cụ mạng lõi của hệ điều hành Linux (áp dụng cho Ubuntu/Debian):
+
+```bash
+# 1. Cập nhật hệ thống
+sudo apt-get update -y
+
+# 2. Cài đặt các gói biên dịch C/C++, eBPF (XDP) và công cụ mạng
+sudo apt-get install -y clang llvm libbpf-dev linux-tools-common linux-tools-generic gcc make build-essential ethtool curl jq
+
+# 3. Cài đặt Go (1.24.0) để biên dịch mã nguồn
+wget https://go.dev/dl/go1.24.0.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf go1.24.0.linux-amd64.tar.gz
+
+# 4. Cấu hình biến môi trường PATH
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+source ~/.bashrc
+
+# Kiểm tra phiên bản Go
+go version
+```
+
+---
+
+## 🛠️ 3. HƯỚNG DẪN BIÊN DỊCH (BUILD BINARY TỪ MÃ NGUỒN)
+Sau khi cài đặt xong Go và các packages, tiến hành Build mã nguồn thành file Binary để chạy độc lập:
+
+```bash
+# 1. Clone source code
+git clone https://github.com/hoangtuvungcao/mango-waf.git
+cd mango-waf
+
+# 2. Tải và đồng bộ các module thư viện của Go
+go mod tidy
+
+# 3. Biên dịch mã nguồn (Build) thành file Binary
+go build -o mango-shield cmd/cli/main.go
+
+# 4. Kiểm tra file đã build thành công
+ls -la mango-shield
+```
+
+---
+
+## 🛡️ 4. SETUP eBPF / XDP ĐỂ LỌC DDOS TẠI TẦNG KERNEL
+Công nghệ XDP (eXpress Data Path) giúp DROP các gói tin rác trực tiếp ở Card mạng, không cần đẩy vào Kernel TCP/IP Stack, giúp bảo vệ CPU khỏi cạn kiệt.
+
+**Bước 1:** Xác định tên Card mạng của bạn (VD: `eth0`, `ens3`, `eno1`) bằng lệnh:
+```bash
+ip -br a
+```
+
+**Bước 2:** Biên dịch và đính XDP vào Card mạng (Yêu cầu quyền root):
+```bash
+cd xdp
+chmod +x setup_xdp.sh
+sudo ./setup_xdp.sh
+```
+*Script sẽ tự động compile code C (`mango_xdp.c`) sang eBPF bytecode bằng `clang` và mount vào Kernel.*
+
+**Bước 3 (Tùy chọn):** Gỡ bỏ XDP khỏi Card mạng nếu không dùng nữa (thay `eth0` bằng tên Card thật):
+```bash
+sudo ip link set dev eth0 xdp off
+```
+
+---
+
+## 🌐 5. THIẾT LẬP CỤM ĐỒNG BỘ (P2P CLUSTER MESH)
+Để các máy chủ (Node) tự động chia sẻ danh sách IP bị cấm (Banned IPs) với nhau theo thời gian thực (độ trễ <10ms), bạn phải cấu hình cụm Mesh.
+
+Mở file cấu hình gốc (ví dụ: `config/production.yaml`) và chỉnh sửa block `cluster`:
+```yaml
+cluster:
+  enabled: true
+  node_name: "node-01"           # ĐẶT DUY NHẤT trên từng server (node-01, node-02, ...)
+  bind_port: 7946
+  advertise_ip: "103.77.246.167" # IP CÔNG CỘNG của VPS hiện tại (để các Node khác nhận diện)
+  cname_target: ""               # Để trống
+  join_peers:
+    - "103.77.246.167:7946"      # Khai báo IP của Node 1
+    - "103.77.246.107:7946"      # Khai báo IP của Node 2
+  secret_key: "MANGO_MESH_SECRET_2026" # Key bảo mật: Bắt buộc giống nhau trên toàn bộ các Node
+```
+
+---
+
+## ▶️ 6. RUN & TEST VỚI CẤU HÌNH ĐẦY ĐỦ (FULL CONFIG)
+Cuối cùng, khởi chạy hệ thống bằng Binary vừa build cùng với file cấu hình tổng thể.
+
+**Bước 1: Tối ưu hoá Kernel cho Network Load (Chống kẹt Socket)**
 ```bash
 sudo sysctl -w net.core.somaxconn=65535
 sudo sysctl -w net.ipv4.tcp_max_syn_backlog=65535
@@ -32,81 +115,29 @@ sudo sysctl -w net.core.rmem_max=16777216
 sudo sysctl -w net.core.wmem_max=16777216
 ```
 
-Hệ thống **Mango WAF** sẽ tự động gọi `syscall.Setrlimit(RLIMIT_NOFILE, 100000)` khi khởi chạy để mở tối đa **100.000 Socket đồng thời**.
-
----
-
-## 🚀 3. QUY TRÌNH TRIỂN KHAI DOCKER (PRODUCTION DEPLOYMENT)
-
-### Bước 1: Chuẩn bị file cấu hình
-Hệ thống đi kèm 2 file cấu hình chuẩn Production:
-- `config/production.yaml`: Cấu hình tổng thể cho mô hình có Cloudflare hoặc Proxy trung gian.
-- `config/production-nocf.yaml`: Cấu hình tối ưu cao nhất cho mô hình Direct-IP (Chạy trực tiếp trên VPS).
-
-### Bước 2: Chạy Docker Compose
+**Bước 2: Cấp quyền và chạy Binary (Bare-metal)**
 ```bash
+# Quay lại thư mục gốc dự án
 cd /root/mango-waf
-docker compose up -d --build
+
+# Cấp quyền cho Binary có thể bind các port thấp (80, 443) mà không cần chạy 'sudo'
+sudo setcap 'cap_net_bind_service=+ep' ./mango-shield
+
+# Khởi chạy WAF với cấu hình production (trực tiếp ra stdout)
+./mango-shield -config=config/production-nocf.yaml
 ```
 
-### Bước 3: Kiểm tra Container & Port Mapping
+**Bước 3: Test hệ thống toàn diện**
+1. **Kiểm tra API Health Check nội bộ** (Mở 1 tab SSH khác):
 ```bash
-docker ps
+curl -s http://localhost:9090/api/health | jq
 ```
-Đảm bảo container `mango-shield` đang lắng nghe các cổng:
-- `80/tcp`: HTTP Server & Redirect.
-- `443/tcp`: HTTPS SSL/TLS.
-- `443/udp`: **HTTP/3 (QUIC over UDP)**.
-- `9090/tcp`: Dashboard UI & Monitoring API.
-- `7946/tcp+udp`: Cluster Mesh P2P Synchronization.
-
----
-
-## 🛡️ 4. KÍCH HOẠT MÀNG LỌC KERNEL eBPF/XDP (OPTIONAL FOR DIRECT IP)
-
-Nếu máy chủ chịu đợt tấn công SYN/UDP Flood nặng, kích hoạt XDP để lọc gói tin trực tiếp từ Card mạng:
-
+2. **Kiểm tra chịu tải DDoS** (Sử dụng công cụ `hey` hoặc `ab` hoặc máy phụ):
 ```bash
-cd /root/mango-waf/xdp
-chmod +x setup_xdp.sh
-sudo ./setup_xdp.sh
+# Gửi 10.000 requests, 1000 connections đồng thời
+hey -n 10000 -c 1000 http://<IP_hoặc_Domain_của_bạn>/
 ```
-
-Để gỡ bỏ XDP filter:
-```bash
-sudo ip link set dev <NIC_NAME> xdp off
-```
-
----
-
-## 🌐 5. CẤU HÌNH CỤM NHAU ĐỒNG BỘ P2P MESH (MULTI-NODE CLUSTER)
-
-Trên từng VPS trong cụm, cập nhật phần `cluster` trong file `config/production.yaml`:
-
-```yaml
-cluster:
-  enabled: true
-  node_name: "node-01" # Đặt duy nhất cho từng VPS (VD: node-01, node-02)
-  advertise_ip: "103.77.246.167" # IP công cộng của VPS hiện tại
-  bind_port: 7946
-  join_peers:
-    - "103.77.246.167:7946"
-    - "103.77.246.107:7946"
-  secret_key: "MANGO_MESH_SECRET_2026"
-```
-
-Khi có IP bị khóa ở Node 1, Node 1 sẽ tự động phát gói tin UDP Gossip sang Node 2 để khóa ngay lập tức!
-
----
-
-## 🔄 6. HOT-RELOAD CẤU HÌNH KHÔNG CẦN RESTART (ZERO DOWNTIME)
-
-Bất kỳ lúc nào bạn thay đổi cấu hình qua Dashboard UI hoặc chỉnh trực tiếp file `production.yaml`, có thể gửi tín hiệu SIGHUP để nạp lại cấu hình vào RAM:
-
-```bash
-docker kill -s HUP mango-shield
-```
-
-Nhật ký sẽ báo:
-`{"msg":"SIGHUP received — hot reload config"}`
-`{"msg":"Config reloaded successfully"}`
+3. **Theo dõi giám sát Terminal**:
+- Hệ thống sẽ hiển thị log Block/Ban IP.
+- Chức năng Mesh sẽ in ra log `[Mesh] Broadcasting ban for IP...` (Node này đẩy lệnh Banned sang Node kia).
+- Theo dõi RPS tăng mạnh trên Log nhưng CPU load rất thấp.

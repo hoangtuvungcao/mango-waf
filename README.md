@@ -65,7 +65,7 @@ curl -s http://localhost:9090/api/health
 
 ## 📖 TÀI LIỆU HƯỚNG DẪN CHI TIẾT
 
-Vui lòng xem tài liệu thiết lập nâng cao tại **[SETUP.md](SETUP.md)**:
+Vui lòng xem tài liệu thiết lập nâng cao tại **[docs/SETUP.md](docs/SETUP.md)**:
 - Cấu hình VPS 8 CPU / 8GB RAM tối ưu nhất.
 - Hướng dẫn gán Kernel eBPF/XDP vào Card mạng.
 - Thiết lập cụm Mesh Multi-Node (Cluster).

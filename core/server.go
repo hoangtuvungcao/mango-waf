@@ -528,6 +528,30 @@ func (s *Shield) SetFingerprintStore(store *fingerprint.FingerprintStore) {
 // Stop gracefully stops the server
 func (s *Shield) Stop() {
 	logger.Info("Mango Shield shutting down...")
+	
+	// Flush any active attack end notifications before shutdown
+	if s.stats.IsUnderAttack {
+		duration := time.Since(s.stats.AttackStartTime)
+		blocked := atomic.LoadInt64(&s.stats.BlockedRequests)
+		s.pipeline.alerts.SendAttackEnd(duration, blocked)
+	}
+
+	s.domainUnderAttack.Range(func(key, value interface{}) bool {
+		if isUnder, ok := value.(bool); ok && isUnder {
+			dName := key.(string)
+			start := time.Now()
+			if st, ok := s.domainAttackStart.Load(dName); ok {
+				start = st.(time.Time)
+			}
+			duration := time.Since(start)
+			s.pipeline.alerts.SendDomainAttackEnd(dName, duration, atomic.LoadInt64(&s.stats.BlockedRequests))
+		}
+		return true
+	})
+
+	// Wait 1 second to allow alert queue to process Discord/Telegram webhooks
+	time.Sleep(1 * time.Second)
+
 	s.cancel()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
