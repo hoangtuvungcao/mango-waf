@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -192,12 +193,16 @@ var (
 
 // SendDomainAttackEnd sends attack end notification for a specific target domain
 func (a *AlertManager) SendDomainAttackEnd(domain string, duration time.Duration, blocked int64) {
+	logger.Info("AlertManager executing SendDomainAttackEnd", "domain", domain, "blocked", blocked, "duration", duration)
+	
 	// Only the designated cluster leader sends external notifications to prevent duplication
 	if m := cluster.GetMesh(); m != nil && !m.IsLeader() {
+		logger.Debug("AlertManager dropped SendDomainAttackEnd: not cluster leader")
 		return
 	}
 
 	if !a.canSend("attack_end_" + domain) {
+		logger.Warn("AlertManager dropped SendDomainAttackEnd: canSend returned false (Rate Limited)", "domain", domain)
 		return
 	}
 
@@ -458,6 +463,7 @@ func (a *AlertManager) sendDiscord(embed DiscordEmbed) {
 		"embeds": []DiscordEmbed{embed},
 	}
 	body, _ := json.Marshal(payload)
+	logger.Debug("Sending Discord alert", "embed_title", embed.Title)
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(cfg.WebhookURL, "application/json", bytes.NewReader(body))
@@ -465,7 +471,14 @@ func (a *AlertManager) sendDiscord(embed DiscordEmbed) {
 		logger.Error("Discord gửi thất bại", "error", err)
 		return
 	}
-	resp.Body.Close()
+	defer resp.Body.Close()
+	
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(resp.Body)
+		logger.Error("Discord API Error", "status", resp.StatusCode, "body", string(b))
+	} else {
+		logger.Info("Discord alert sent successfully", "title", embed.Title)
+	}
 }
 
 func (a *AlertManager) sendWebhook(text string) {
