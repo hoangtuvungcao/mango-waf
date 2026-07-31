@@ -618,6 +618,9 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Alt-Svc", fmt.Sprintf(`h3=":%d"; ma=86400`, h3Port))
 	}
 
+	// Extract client IP early for rate limit page
+	ip := s.extractIP(r)
+
 	// Exclude internal telemetry /api/ polling from request counters so dashboard polling doesn't inflate RPS charts
 	if !strings.HasPrefix(r.URL.Path, "/api/") {
 		atomic.AddInt64(&s.stats.TotalRequests, 1)
@@ -638,13 +641,14 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		if active > 5000 {
 			w.Header().Set("X-Mango-Shield", "overload")
 			w.Header().Set("Retry-After", "5")
-			http.Error(w, "503 Service Unavailable - Target Overloaded", http.StatusServiceUnavailable)
+			if s.challMgr != nil {
+				s.challMgr.ServeRateLimitPage(w, r, ip, 5)
+			} else {
+				http.Error(w, "503 Service Unavailable - Target Overloaded", http.StatusServiceUnavailable)
+			}
 			return
 		}
 	}
-
-	// Extract client IP
-	ip := s.extractIP(r)
 
 	// Fast-path static logo & favicon asset serving with long-term immutable caching
 	if r.URL.Path == "/logo-mango.png" || r.URL.Path == "/logo-mango-small.png" || r.URL.Path == "/assets/logo-mango.png" || r.URL.Path == "/favicon.ico" || r.URL.Path == "/apple-touch-icon.png" {

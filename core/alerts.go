@@ -126,6 +126,9 @@ func (a *AlertManager) SendDomainAttackStart(domain string, totalRPS, totalConns
 		return
 	}
 
+	// Reset cooldown for attack_end so the end alert always triggers
+	a.ClearCooldown("attack_end_" + domain)
+
 	if domain != "General System" {
 		domainAttackActiveMu.Lock()
 		activeAttackDomain = domain
