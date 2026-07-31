@@ -48,8 +48,6 @@ type Pipeline struct {
 	ipStates      *IPStateMap       // 256-shard high-concurrency map
 	banned        sync.Map          // map[string]time.Time
 	whitelist     sync.Map          // map[string]time.Time
-	activeConns   sync.Map          // map[string]*int64
-	connCount     sync.Map          // map[string]int
 	alerts        *AlertManager
 	intel         *intelligence.Intel
 	detEngine     *detection.Engine
@@ -257,7 +255,6 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 
 	// Layer 0.1: Verified proof cookie (Human user bypass for anti-DDoS rate limits & challenges)
 	// REMOVED: Early ActionAllow bypasses rate limits. We now let it fall through and bypass challenges inside determineStageWithFP.
-
 
 	// Layer 0.2: Static assets & stats endpoints bypass
 	if isStaticAsset(r.URL.Path) {

@@ -9,15 +9,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"math/big"
-	"net"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"sync/atomic"
-	"time"
+	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/sys/unix"
 	"mango-waf/challenge"
 	"mango-waf/cluster"
 	"mango-waf/config"
@@ -27,41 +20,48 @@ import (
 	"mango-waf/logger"
 	"mango-waf/perf"
 	"mango-waf/rules"
+	"math/big"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
-	"github.com/quic-go/quic-go/http3"
-	"golang.org/x/sys/unix"
+	"time"
 )
 
 // Shield is the main Mango Shield server
 type Shield struct {
-	cfg               *config.Config
-	pipeline          *Pipeline
-	stats             *Stats
-	httpServer        *http.Server
-	redirectServer    *http.Server
-	listener          net.Listener
-	fpStore           *fingerprint.FingerprintStore
-	challMgr          *challenge.Manager
-	intel             *intelligence.Intel
-	detEngine         *detection.Engine
-	behavior          *detection.BehaviorAnalyzer
-	botClass          *detection.BotClassifier
-	attackDet         *detection.AttackDetector
-	adaptive          *detection.AdaptiveLearner
-	wafEngine         *rules.Engine
-	rateLimiter       *perf.IPRateLimiter
-	degrader          *perf.GracefulDegrader
-	validator         *perf.RequestValidator
-	upstreams         *UpstreamManager
-	ctx               context.Context
-	cancel            context.CancelFunc
-	wg                sync.WaitGroup
-	domainReqs        sync.Map // domain -> *DomainCounter
-	domainLastReqs    sync.Map // domain -> int64
-	domainRPS         sync.Map // domain -> int64
-	domainUnderAttack sync.Map // domain -> bool
-	domainAttackStart sync.Map // domain -> time.Time
-	domainNormalCount sync.Map // domain -> int
+	cfg                 *config.Config
+	pipeline            *Pipeline
+	stats               *Stats
+	httpServer          *http.Server
+	redirectServer      *http.Server
+	listener            net.Listener
+	fpStore             *fingerprint.FingerprintStore
+	challMgr            *challenge.Manager
+	intel               *intelligence.Intel
+	detEngine           *detection.Engine
+	behavior            *detection.BehaviorAnalyzer
+	botClass            *detection.BotClassifier
+	attackDet           *detection.AttackDetector
+	adaptive            *detection.AdaptiveLearner
+	wafEngine           *rules.Engine
+	rateLimiter         *perf.IPRateLimiter
+	degrader            *perf.GracefulDegrader
+	validator           *perf.RequestValidator
+	upstreams           *UpstreamManager
+	ctx                 context.Context
+	cancel              context.CancelFunc
+	wg                  sync.WaitGroup
+	domainReqs          sync.Map // domain -> *DomainCounter
+	domainLastReqs      sync.Map // domain -> int64
+	domainRPS           sync.Map // domain -> int64
+	domainUnderAttack   sync.Map // domain -> bool
+	domainAttackStart   sync.Map // domain -> time.Time
+	domainNormalCount   sync.Map // domain -> int
 	configuredTransport *http.Transport
 	transportOnce       sync.Once
 }
@@ -551,26 +551,43 @@ func (s *Shield) normalizeHost(host string) string {
 	return host
 }
 
-// IsDomainUnderAttack returns whether a specific domain is currently under attack or configured in forced protection mode
 func (s *Shield) IsDomainUnderAttack(host string) bool {
 	host = s.normalizeHost(host)
-	for _, d := range s.cfg.Domains {
-		dName := strings.ToLower(d.Name)
-		if host == dName || strings.HasSuffix(host, "."+dName) || strings.Contains(host, dName) {
-			if d.ProtectionMode == "under_attack" || d.ProtectionMode == "emergency" || d.ProtectionMode == "challenge" || d.ProtectionMode == "captcha" {
-				return true
-			}
-			if val, ok := s.domainUnderAttack.Load(dName); ok {
-				return val.(bool)
-			}
-		}
-	}
+
+	// 1. Fast global check
 	if s.cfg != nil && (s.cfg.Protection.Mode == "under_attack" || s.cfg.Protection.Mode == "emergency") {
 		return true
 	}
+
+	// 2. Fast dynamic attack state check (auto-triggered by AlertManager)
 	if val, ok := s.domainUnderAttack.Load(host); ok {
-		return val.(bool)
+		if val.(bool) {
+			return true
+		}
 	}
+
+	// 3. Fast O(1) domain protection mode check
+	if s.pipeline != nil && s.pipeline.domainModeMap != nil {
+		mode := s.pipeline.domainModeMap[host]
+		if mode == "under_attack" || mode == "emergency" || mode == "challenge" || mode == "captcha" {
+			return true
+		}
+	} else if s.cfg != nil {
+		// Fallback O(N) if map is somehow nil
+		for i := 0; i < len(s.cfg.Domains); i++ {
+			dName := strings.ToLower(s.cfg.Domains[i].Name)
+			if host == dName || strings.HasSuffix(host, "."+dName) {
+				m := s.cfg.Domains[i].ProtectionMode
+				if m == "under_attack" || m == "emergency" || m == "challenge" || m == "captcha" {
+					return true
+				}
+				if val, ok := s.domainUnderAttack.Load(dName); ok {
+					return val.(bool)
+				}
+			}
+		}
+	}
+
 	return false
 }
 
@@ -1060,23 +1077,6 @@ func (s *Shield) extractIP(r *http.Request) string {
 	return peerHost
 }
 
-func extractIP(r *http.Request) string {
-	if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
-		return trimSpace(cfip)
-	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		return trimSpace(xri)
-	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := splitFirst(xff, ",")
-		return trimSpace(parts)
-	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
 
 func splitFirst(s, sep string) string {
 	for i := 0; i < len(s); i++ {

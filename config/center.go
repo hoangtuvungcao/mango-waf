@@ -35,15 +35,15 @@ type ConfigBackup struct {
 
 // ConfigCenter manages single source of truth configuration
 type ConfigCenter struct {
-	mu           sync.RWMutex
-	currentPath  string
+	mu            sync.RWMutex
+	currentPath   string
 	currentConfig *Config
-	rawYAML      string
-	revisions    []ConfigRevision
-	backups      []ConfigBackup
-	reloadHooks  []func(newCfg *Config) error
-	historyDir   string
-	backupDir    string
+	rawYAML       string
+	revisions     []ConfigRevision
+	backups       []ConfigBackup
+	reloadHooks   []func(newCfg *Config) error
+	historyDir    string
+	backupDir     string
 }
 
 var globalCenter *ConfigCenter

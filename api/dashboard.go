@@ -400,26 +400,39 @@ func (d *Dashboard) fetchPeerStats(endpoint string) []map[string]interface{} {
 	}
 
 	results := make([]map[string]interface{}, 0)
-	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	client := &http.Client{Timeout: 800 * time.Millisecond}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
 	for peerIP := range peerMap {
 		if peerIP == d.cfg.Cluster.AdvertiseIP || peerIP == "127.0.0.1" || peerIP == "localhost" || peerIP == "" {
 			continue
 		}
-		url := fmt.Sprintf("http://%s:1234%s?local=true", peerIP, endpoint)
-		req, err := http.NewRequest(http.MethodGet, url, nil)
-		if err != nil {
-			continue
-		}
-		req.Header.Set("X-Sync-Internal", "true")
-		resp, err := client.Do(req)
-		if err == nil && resp != nil {
-			var data map[string]interface{}
-			if json.NewDecoder(resp.Body).Decode(&data) == nil {
-				results = append(results, data)
+
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			url := fmt.Sprintf("http://%s:1234%s?local=true", ip, endpoint)
+			req, err := http.NewRequest(http.MethodGet, url, nil)
+			if err != nil {
+				return
 			}
-			resp.Body.Close()
-		}
+			req.Header.Set("X-Sync-Internal", "true")
+			resp, err := client.Do(req)
+			if err == nil && resp != nil {
+				var data map[string]interface{}
+				if json.NewDecoder(resp.Body).Decode(&data) == nil {
+					mu.Lock()
+					results = append(results, data)
+					mu.Unlock()
+				}
+				resp.Body.Close()
+			}
+		}(peerIP)
 	}
+
+	wg.Wait()
 	return results
 }
 
@@ -552,10 +565,20 @@ func (d *Dashboard) handleRPSHistory(w http.ResponseWriter, r *http.Request) {
 var (
 	prevCPUIdle  uint64
 	prevCPUTotal uint64
+	prevCPUPct   float64
+	prevCPUTime  time.Time
 	cpuMu        sync.Mutex
 )
 
 func readCPUUsage() float64 {
+	cpuMu.Lock()
+	if time.Since(prevCPUTime) < 500*time.Millisecond {
+		pct := prevCPUPct
+		cpuMu.Unlock()
+		return pct
+	}
+	cpuMu.Unlock()
+
 	f, err := os.Open("/proc/stat")
 	if err != nil {
 		return 0
@@ -588,11 +611,13 @@ func readCPUUsage() float64 {
 	dIdle := idle - prevCPUIdle
 	prevCPUTotal = total
 	prevCPUIdle = idle
+	prevCPUTime = time.Now()
 
 	if dTotal == 0 {
-		return 0
+		return prevCPUPct
 	}
-	return float64(dTotal-dIdle) / float64(dTotal) * 100
+	prevCPUPct = float64(dTotal-dIdle) / float64(dTotal) * 100
+	return prevCPUPct
 }
 
 func readMemInfo() (totalMB, usedMB, availMB uint64) {
@@ -684,7 +709,21 @@ func readUptime() float64 {
 	return 0
 }
 
+var (
+	prevTCPCount int
+	prevTCPTime  time.Time
+	tcpMu        sync.Mutex
+)
+
 func readTCPConnections() int {
+	tcpMu.Lock()
+	if time.Since(prevTCPTime) < 2*time.Second {
+		count := prevTCPCount
+		tcpMu.Unlock()
+		return count
+	}
+	tcpMu.Unlock()
+
 	count := 0
 	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
 		f, err := os.Open(path)
@@ -700,6 +739,12 @@ func readTCPConnections() int {
 	if count >= 2 {
 		count -= 2 // subtract header lines
 	}
+
+	tcpMu.Lock()
+	prevTCPCount = count
+	prevTCPTime = time.Now()
+	tcpMu.Unlock()
+
 	return count
 }
 
@@ -1162,7 +1207,7 @@ func (d *Dashboard) corsMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
-		
+
 		csp := "default-src 'self' 'unsafe-inline' 'unsafe-eval' https://static.cloudflareinsights.com;" +
 			"font-src 'self' https://fonts.gstatic.com;" +
 			"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;" +
@@ -1203,24 +1248,24 @@ func writeJSON(w http.ResponseWriter, data interface{}) {
 
 // StatsAdapter bridges Shield.Stats to StatsProvider
 type StatsAdapter struct {
-	TotalReqs          *int64
-	BlockedReqs        *int64
-	PassedReqs         *int64
-	CurrRPS            *int64
-	PkRPS              *int64
-	ActiveCn           *int64
-	BannedIP           *int64
-	AttacksDet         *int64
-	UnderAttack        *bool
-	UptimeStart        time.Time
-	XDP                func() (bool, int64, int64)
-	EarlyStats         func() (int64, int64)
-	CDNStats           func() (int64, int64, int64)
-	MeshStats          func() (bool, int)
-	MeshMembers        func() []cluster.NodeInfo
-	UnbanFunc          func(ip string)
-	UnbanAll           func()
-	UpdateUpstreamFunc func(domains []config.DomainConfig)
+	TotalReqs            *int64
+	BlockedReqs          *int64
+	PassedReqs           *int64
+	CurrRPS              *int64
+	PkRPS                *int64
+	ActiveCn             *int64
+	BannedIP             *int64
+	AttacksDet           *int64
+	UnderAttack          *bool
+	UptimeStart          time.Time
+	XDP                  func() (bool, int64, int64)
+	EarlyStats           func() (int64, int64)
+	CDNStats             func() (int64, int64, int64)
+	MeshStats            func() (bool, int)
+	MeshMembers          func() []cluster.NodeInfo
+	UnbanFunc            func(ip string)
+	UnbanAll             func()
+	UpdateUpstreamFunc   func(domains []config.DomainConfig)
 	GetBannedIPsListFunc func() []BannedIPEntry
 }
 
@@ -2028,7 +2073,7 @@ func (d *Dashboard) handleNodes(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			
+
 			fallbacks := []struct {
 				Lat float64
 				Lon float64
@@ -2037,7 +2082,7 @@ func (d *Dashboard) handleNodes(w http.ResponseWriter, r *http.Request) {
 				{Lat: 10.8231, Lon: 106.6297}, // HCMC
 				{Lat: 16.0544, Lon: 108.2022}, // Da Nang
 			}
-			
+
 			fb := fallbacks[nodeIdx%len(fallbacks)]
 			lat = fb.Lat
 			lon = fb.Lon
@@ -2115,9 +2160,9 @@ func (d *Dashboard) handleFirewallBans(w http.ResponseWriter, r *http.Request) {
 		entries = []BannedIPEntry{}
 	}
 	writeJSON(w, map[string]interface{}{
-		"status":  "success",
-		"bans":    entries,
-		"total":   len(entries),
+		"status": "success",
+		"bans":   entries,
+		"total":  len(entries),
 	})
 }
 
@@ -2237,7 +2282,7 @@ func (d *Dashboard) handleAttackStream(w http.ResponseWriter, r *http.Request) {
 func (d *Dashboard) handleWorldSVG(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/svg+xml")
 	w.Header().Set("Cache-Control", "public, max-age=86400") // cache for 1 day
-	
+
 	// Serve local world.svg if exists
 	if _, err := os.Stat("world.svg"); err == nil {
 		http.ServeFile(w, r, "world.svg")
@@ -2247,9 +2292,7 @@ func (d *Dashboard) handleWorldSVG(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "../world.svg")
 		return
 	}
-	
+
 	// Fallback to empty tiny SVG if not found
 	w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 857" width="2000" height="857"><rect width="2000" height="857" fill="#020617"/></svg>`))
 }
-
-

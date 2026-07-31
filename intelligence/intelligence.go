@@ -328,7 +328,7 @@ func (g *GeoProvider) Lookup(ipStr string) (*GeoResult, error) {
 		{Code: "KR", Name: "South Korea", Lat: 35.9, Lon: 127.7},
 		{Code: "CA", Name: "Canada", Lat: 56.1, Lon: -106.3},
 	}
-	
+
 	fb := countryFallbackList[int(b0)%len(countryFallbackList)]
 
 	return &GeoResult{

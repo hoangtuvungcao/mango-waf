@@ -48,23 +48,23 @@ func (e *Engine) UpdateConfig(cfg *config.Config) {
 
 // Rule represents a single WAF rule
 type Rule struct {
-	ID           string
-	Name         string
-	Description  string
-	Category     string   // sqli, xss, rce, lfi, rfi, ssrf, dos, scanner, custom
-	Severity     string   // low, medium, high, critical
-	Phase        int      // 1=request_headers, 2=request_body, 3=response_headers, 4=response_body
-	Targets      []string // URL, ARGS, HEADERS, BODY, COOKIE, UA, METHOD
-	Operator     string   // rx (regex), eq, contains, beginsWith, endsWith, gt, lt
-	Pattern      string
+	ID              string
+	Name            string
+	Description     string
+	Category        string   // sqli, xss, rce, lfi, rfi, ssrf, dos, scanner, custom
+	Severity        string   // low, medium, high, critical
+	Phase           int      // 1=request_headers, 2=request_body, 3=response_headers, 4=response_body
+	Targets         []string // URL, ARGS, HEADERS, BODY, COOKIE, UA, METHOD
+	Operator        string   // rx (regex), eq, contains, beginsWith, endsWith, gt, lt
+	Pattern         string
 	PatternLower    string
 	RequiredKeyword string
 	Compiled        *regexp.Regexp
-	Action       string // block, log, challenge, drop
-	Enabled      bool
-	Tags         []string
-	Paranoia     int // 1-4 paranoia level
-	Hits         int64
+	Action          string // block, log, challenge, drop
+	Enabled         bool
+	Tags            []string
+	Paranoia        int // 1-4 paranoia level
+	Hits            int64
 }
 
 // MatchResult holds the result of a rule match
@@ -89,7 +89,6 @@ type EngineStats struct {
 	TotalInspected int64
 	TotalBlocked   int64
 	TotalMatched   int64
-	statsMu        sync.Mutex
 	RuleHits       map[string]int64
 }
 
@@ -199,19 +198,19 @@ func (e *Engine) Inspect(r *http.Request) *InspectResult {
 
 // requestData holds zero-allocation request data wrappers for inspection
 type requestData struct {
-	r            *http.Request
-	url          string
-	urlLower     string
-	ua           string
-	uaLower      string
-	Path         string
-	PathLower    string
-	Query        string
-	QueryLower   string
-	Method       string
-	MethodLower  string
-	headers      []headerVal
-	headersDone  bool
+	r           *http.Request
+	url         string
+	urlLower    string
+	ua          string
+	uaLower     string
+	Path        string
+	PathLower   string
+	Query       string
+	QueryLower  string
+	Method      string
+	MethodLower string
+	headers     []headerVal
+	headersDone bool
 }
 
 type headerVal struct {

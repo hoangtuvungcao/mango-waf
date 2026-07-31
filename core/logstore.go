@@ -16,15 +16,15 @@ import (
 type SecurityLogEvent struct {
 	ID          uint64 `json:"id"`
 	Timestamp   string `json:"timestamp"`
-	Type        string `json:"type"`      // SECURITY, EXPLOIT, ACCESS, CHALLENGE, BAN
+	Type        string `json:"type"` // SECURITY, EXPLOIT, ACCESS, CHALLENGE, BAN
 	ClientIP    string `json:"client_ip"`
 	Domain      string `json:"domain"`
 	Method      string `json:"method"`
 	Path        string `json:"path"`
 	Status      int    `json:"status"`
-	Action      string `json:"action"`    // BLOCKED, DROPPED, PASSED, CHALLENGE_SOLVED
-	Rule        string `json:"rule"`      // Rule ID or category (e.g., OWASP-942100, SQLi, XSS)
-	Desc        string `json:"desc"`      // Event details / payload snippet
+	Action      string `json:"action"` // BLOCKED, DROPPED, PASSED, CHALLENGE_SOLVED
+	Rule        string `json:"rule"`   // Rule ID or category (e.g., OWASP-942100, SQLi, XSS)
+	Desc        string `json:"desc"`   // Event details / payload snippet
 	CountryCode string `json:"country_code"`
 	CountryName string `json:"country_name"`
 }
@@ -105,13 +105,15 @@ func (ls *LogStore) RecordEvent(eventType, clientIP, domain, method, path string
 	}
 
 	// Smart Log Sampling under DDoS / Heavy Load (> 200 RPS):
-	// Under DDoS, sampling high-frequency repetitive logs (ACCESS, CHALLENGE_REQUIRED) prevents API & UI lag
+	// Under DDoS, sampling high-frequency repetitive logs prevents API & UI lag
 	if ls.curRPS != nil {
 		rps := atomic.LoadInt64(ls.curRPS)
 		if rps > 200 {
-			if eventType == "ACCESS" || (eventType == "CHALLENGE" && action == "CHALLENGE_REQUIRED") {
-				// Sample 1 out of 20 logs during DDoS surge
-				if rand.Intn(20) != 0 {
+			if eventType == "ACCESS" ||
+				(eventType == "CHALLENGE" && action == "CHALLENGE_REQUIRED") ||
+				(eventType == "SECURITY" && rule == "rate_limit") {
+				// Sample 1 out of 50 logs during DDoS surge
+				if rand.Intn(50) != 0 {
 					return
 				}
 			}
@@ -119,12 +121,23 @@ func (ls *LogStore) RecordEvent(eventType, clientIP, domain, method, path string
 	}
 
 	var countryCode, countryName string
-	if gp := getLogGeoProvider(); gp != nil {
-		if geo, err := gp.Lookup(clientIP); err == nil {
-			countryCode = geo.CountryCode
-			countryName = geo.Country
+	// Skip heavy MaxMind DB lookups if RPS is extremely high (> 1000)
+	skipGeo := false
+	if ls.curRPS != nil {
+		if atomic.LoadInt64(ls.curRPS) > 1000 {
+			skipGeo = true
 		}
 	}
+
+	if !skipGeo {
+		if gp := getLogGeoProvider(); gp != nil {
+			if geo, err := gp.Lookup(clientIP); err == nil {
+				countryCode = geo.CountryCode
+				countryName = geo.Country
+			}
+		}
+	}
+
 	if countryCode == "" {
 		countryCode = "XX"
 	}
