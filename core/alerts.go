@@ -171,9 +171,12 @@ func (a *AlertManager) SendDomainAttackStart(domain string, totalRPS, totalConns
 		Color:       0xFF4B4B, // Red
 		Fields: []DiscordField{
 			{Name: "🎯 Tên miền", Value: fmt.Sprintf("`%s`", domain), Inline: false},
+			{Name: "💥 Loại tấn công", Value: fmt.Sprintf("`%s`", triggerReason), Inline: false},
 			{Name: "📊 Tổng RPS Cluster", Value: fmt.Sprintf("`%d req/s`", totalRPS), Inline: true},
 			{Name: "⚡ Tổng Sockets Cluster", Value: fmt.Sprintf("`%d conns`", totalConns), Inline: true},
 			{Name: "🔗 Cluster Status", Value: fmt.Sprintf("`%d Nodes Online`", clusterSize), Inline: true},
+			{Name: "🔴 Trạng thái", Value: fmt.Sprintf("**UNDER ATTACK** (Chế độ tự động bật cho domain %s)", domain), Inline: false},
+			{Name: "🛡️ Hành động WAF", Value: "Tự động nâng cấp siết chặt bảo vệ (PoW & eBPF)", Inline: false},
 		},
 		Footer: DiscordFooter{Text: "🥭 Mango Shield Enterprise"},
 	}
