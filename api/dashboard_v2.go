@@ -547,7 +547,14 @@ a:hover{color:var(--accent)}
   <nav class="landing-nav" id="landing-nav">
     <div class="container nav-inner">
       <div class="nav-logo">
-        <img src="/logo-mango.png" alt="Mango Shield" style="width:28px;height:28px;object-fit:contain">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" style="width:28px;height:28px;object-fit:contain">
+          <defs>
+            <linearGradient id="mGrad0" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient>
+            <linearGradient id="lGrad0" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient>
+          </defs>
+          <path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad0)"/>
+          <path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad0)"/>
+        </svg>
         <span>Mango <span class="text-accent">Shield</span></span>
       </div>
       <div class="nav-links hide-mobile">
@@ -700,7 +707,14 @@ a:hover{color:var(--accent)}
       <div class="footer-grid">
         <div class="footer-brand">
           <div class="nav-logo">
-            <img src="/logo-mango.png" alt="Mango Shield" style="width:28px;height:28px;object-fit:contain">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" style="width:28px;height:28px;object-fit:contain">
+              <defs>
+                <linearGradient id="mGrad1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient>
+                <linearGradient id="lGrad1" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient>
+              </defs>
+              <path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad1)"/>
+              <path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad1)"/>
+            </svg>
             <span>Mango <span class="text-accent">Shield</span></span>
           </div>
           <p>Enterprise-grade Web Application Firewall protection for everyone.</p>
@@ -738,7 +752,14 @@ a:hover{color:var(--accent)}
   <div class="auth-page">
     <div class="auth-card">
       <div class="logo">
-        <img src="/logo-mango.png" alt="Mango Shield" style="width:30px;height:30px;object-fit:contain">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" style="width:30px;height:30px;object-fit:contain">
+          <defs>
+            <linearGradient id="mGrad2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient>
+            <linearGradient id="lGrad2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient>
+          </defs>
+          <path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad2)"/>
+          <path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad2)"/>
+        </svg>
         <span>Mango <span class="text-accent">Shield</span></span>
       </div>
       <p class="subtitle">Secure your infrastructure</p>
@@ -795,7 +816,14 @@ a:hover{color:var(--accent)}
     <!-- Sidebar -->
     <aside class="sidebar" id="sidebar">
       <div class="sidebar-header">
-        <img src="/logo-mango.png" alt="Mango Shield" style="width:28px;height:28px;object-fit:contain">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" style="width:28px;height:28px;object-fit:contain">
+          <defs>
+            <linearGradient id="mGrad3" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient>
+            <linearGradient id="lGrad3" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient>
+          </defs>
+          <path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad3)"/>
+          <path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad3)"/>
+        </svg>
         <span class="logo-text">Mango <span class="text-accent">Shield</span></span>
         <span class="version">v2.0</span>
       </div>
@@ -3249,6 +3277,8 @@ function getCountryCenter(code) {
   return null;
 }
 
+var countryHighlightTimeouts = {};
+
 function highlightCountryOnMap(code) {
   if (!code) return;
   code = code.toUpperCase();
@@ -3316,10 +3346,18 @@ function highlightCountryOnMap(code) {
   
   paths.forEach(function(path) {
     path.classList.add('attack-highlight');
-    setTimeout(function() {
-      path.classList.remove('attack-highlight');
-    }, 1200);
   });
+
+  if (countryHighlightTimeouts[code]) {
+    clearTimeout(countryHighlightTimeouts[code]);
+  }
+  
+  countryHighlightTimeouts[code] = setTimeout(function() {
+    paths.forEach(function(path) {
+      path.classList.remove('attack-highlight');
+    });
+    delete countryHighlightTimeouts[code];
+  }, 2000); // 2 seconds cooldown
 }
 
 function refreshCountryStatsUI() {

@@ -187,7 +187,7 @@ func fetchMetrics() {
 						} else if len(meshMembers) > 0 {
 							nodeCount = len(meshMembers)
 						} else {
-							nodeCount = 2 // Active 2-Node Cluster topology
+							nodeCount = 0
 						}
 						break // Got valid stats from local shield instance!
 					}
@@ -1269,7 +1269,11 @@ function fetchStats() {
     // Settings
     setText('cfg_mode', d.mode || 'auto');
     setText('cfg_xdp', d.xdp_enabled ? 'Active (sys_bpf)' : 'Disabled');
-    setText('cfg_mesh', (d.mesh_nodes || 0) + ' node(s)');
+    if (d.mesh_enabled || d.mesh_nodes > 0) {
+        setText('cfg_mesh', 'Active (' + (d.mesh_nodes || 0) + ' nodes)');
+    } else {
+        setText('cfg_mesh', 'Disabled');
+    }
 
     // Charts
     drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
