@@ -55,18 +55,24 @@ sudo ./mango-shield
 
 ---
 
-## 3. Thiết Lập Hệ Thống Mạng Để Tối Ưu (Tùy Chọn Nhưng Khuyến Nghị)
+## 3. Thiết Lập Hệ Thống Mạng Để Tối Ưu (Rất Khuyến Nghị)
 
-Để chịu tải DDoS lớn, bạn cần nới lỏng giới hạn hệ điều hành:
+Để chịu tải DDoS lớn, chống lại hàng triệu kết nối (SYN Flood, Connection Tracking exhaustion), hệ thống đã cung cấp sẵn script tối ưu hóa Kernel TCP. Script `optimize_tcp.sh` sẽ điều chỉnh các tham số mạng `sysctl` ở mức hardcore để WAF có thể xử lý hàng triệu RPS.
 
 ```bash
-sudo sysctl -w net.core.somaxconn=65535
-sudo sysctl -w net.ipv4.tcp_max_syn_backlog=65535
-sudo sysctl -w net.core.netdev_max_backlog=65535
-sudo sysctl -w net.ipv4.ip_local_port_range="1024 65535"
-sudo sysctl -w net.ipv4.tcp_tw_reuse=1
-sudo sysctl -p
+# 1. Cấp quyền thực thi cho script
+chmod +x scripts/optimize_tcp.sh
+
+# 2. Chạy script dưới quyền root
+sudo ./scripts/optimize_tcp.sh
 ```
+
+**Những gì script này thực hiện:**
+- Tăng giới hạn File Descriptors (`fs.file-max` lên 2,097,152).
+- Bật chống SYN Flood (SYN Cookies, giảm retries, tăng SYN backlog).
+- Nâng cấp giới hạn theo dõi kết nối (`nf_conntrack_max`).
+- Tối ưu hóa việc thu hồi socket nhanh chóng để tránh cạn kiệt ở trạng thái `TIME_WAIT`.
+- Mở rộng giới hạn bộ đệm Socket TCP (Buffers).
 
 ---
 

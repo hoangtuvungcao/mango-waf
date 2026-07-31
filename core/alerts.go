@@ -390,13 +390,13 @@ func (a *AlertManager) sendAllRich(telegramHTML string, discordEmbed DiscordEmbe
 	select {
 	case a.queue <- func() {
 		if a.cfg.Alerts.Telegram.Enabled {
-			a.sendTelegram(telegramHTML)
+			go a.sendTelegram(telegramHTML)
 		}
 		if a.cfg.Alerts.Discord.Enabled {
-			a.sendDiscord(discordEmbed)
+			go a.sendDiscord(discordEmbed)
 		}
 		if a.cfg.Alerts.Webhook.Enabled {
-			a.sendWebhook(telegramHTML)
+			go a.sendWebhook(telegramHTML)
 		}
 	}:
 	default:

@@ -4,7 +4,7 @@
 
 echo "[*] Optimizing Linux TCP/IP stack for High Concurrency DDoS mitigation..."
 
-cat <<EOF > /etc/sysctl.d/99-mango-waf.conf
+cat <<EOF > /etc/sysctl.d/mango-waf.conf
 # 1. Maximize Open Files & File Descriptors (Crucial for Millions of Connections)
 fs.file-max = 2097152
 fs.nr_open = 2097152
@@ -39,7 +39,7 @@ net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 EOF
 
-sysctl -p /etc/sysctl.d/99-mango-waf.conf
+sysctl -p /etc/sysctl.d/mango-waf.conf
 
 echo "[✓] Kernel networking parameters optimized for Mango Shield!"
 echo "    - Raised max file descriptors to 2 Million"
