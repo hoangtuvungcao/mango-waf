@@ -21,8 +21,16 @@ import (
 	"mango-waf/cluster"
 	"mango-waf/config"
 	"mango-waf/core"
+	"mango-waf/intelligence"
 	"mango-waf/logger"
 )
+
+// BannedIPEntry is a single banned IP entry for the firewall ban list API
+type BannedIPEntry struct {
+	IP        string `json:"ip"`
+	ExpiresAt string `json:"expires_at"`
+	TTLSec    int64  `json:"ttl_sec"`
+}
 
 // StatsProvider provides real-time stats
 type StatsProvider interface {
@@ -44,18 +52,25 @@ type StatsProvider interface {
 	UnbanIP(ip string)
 	UnbanAllIPs()
 	UpdateUpstreams(domains []config.DomainConfig)
+	// GetBannedIPsList returns the real-time list of banned IPs from the pipeline
+	GetBannedIPsList() []BannedIPEntry
 }
 
 // Dashboard is the admin dashboard API server
 type Dashboard struct {
 	cfg       *config.Config
 	stats     StatsProvider
+	alerts    *core.AlertManager
 	mux       *http.ServeMux
 	rpsHist   *RingBuffer
 	stopCh    chan struct{}
 	srv       *http.Server
 	srvWeb    *http.Server
 	startTime time.Time
+}
+
+func (d *Dashboard) SetAlertManager(alerts *core.AlertManager) {
+	d.alerts = alerts
 }
 
 // RingBuffer tracks RPS history for charts
@@ -152,6 +167,13 @@ func (d *Dashboard) registerCommonRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/logs/query", d.handleLogsQuery)
 	mux.HandleFunc("/api/logs/clear", d.handleLogsClear)
 	mux.HandleFunc("/api/domains/protection-mode", d.handleDomainProtectionMode)
+	mux.HandleFunc("/api/attack-stream", d.handleAttackStream)
+	mux.HandleFunc("/api/firewall/bans", d.handleFirewallBans)
+	mux.HandleFunc("/logo-mango.png", d.handleLogoMango)
+	mux.HandleFunc("/logo-mango-small.png", d.handleLogoMangoSmall)
+	mux.HandleFunc("/favicon.ico", d.handleLogoMango)
+	mux.HandleFunc("/apple-touch-icon.png", d.handleLogoMango)
+	mux.HandleFunc("/world.svg", d.handleWorldSVG)
 }
 
 func (d *Dashboard) registerRoutes() {
@@ -276,7 +298,7 @@ func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if authUser != nil {
 		token := fmt.Sprintf("mango-session-%d", time.Now().UnixNano())
-		
+
 		st.mu.Lock()
 		for i, u := range st.Data.Users {
 			if strings.EqualFold(u.Username, authUser.Username) {
@@ -485,6 +507,14 @@ func (d *Dashboard) handleStats(w http.ResponseWriter, r *http.Request) {
 		"protection_mode":  d.cfg.Protection.Mode,
 		"domains":          len(d.cfg.Domains),
 		"uptime_seconds":   time.Since(d.startTime).Seconds(),
+		"telegram": func() interface{} {
+			if d.alerts != nil {
+				return d.alerts.GetTelegramStatus()
+			}
+			return core.TelegramStatusInfo{
+				Connected: d.cfg.Alerts.Telegram.Enabled && d.cfg.Alerts.Telegram.Token != "" && d.cfg.Alerts.Telegram.ChatID != "",
+			}
+		}(),
 	})
 }
 
@@ -762,14 +792,26 @@ func (d *Dashboard) handleSystemStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (d *Dashboard) handleDashboardUI9090(w http.ResponseWriter, r *http.Request) {
+func (d *Dashboard) handleDashboardUI9090(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(fullDashboardHTML))
+	html := managementPlatformHTML
+	cnameTarget := d.cfg.Cluster.CNAMETarget
+	if cnameTarget == "" {
+		cnameTarget = "fw.hidev.dev"
+	}
+	html = strings.ReplaceAll(html, "fw.hidev.dev", cnameTarget)
+	w.Write([]byte(html))
 }
 
 func (d *Dashboard) handleDashboardUI1234(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Write([]byte(managementPlatformHTML))
+	html := managementPlatformHTML
+	cnameTarget := d.cfg.Cluster.CNAMETarget
+	if cnameTarget == "" {
+		cnameTarget = "fw.hidev.dev"
+	}
+	html = strings.ReplaceAll(html, "fw.hidev.dev", cnameTarget)
+	w.Write([]byte(html))
 }
 
 func (d *Dashboard) getUserFromRequest(r *http.Request) (string, string) {
@@ -819,10 +861,15 @@ func (d *Dashboard) handleDomains(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
+		cnameTarget := d.cfg.Cluster.CNAMETarget
+		if cnameTarget == "" {
+			cnameTarget = "cname.local"
+		}
 		if CanManageAllDomains(role) {
 			writeJSON(w, map[string]interface{}{
-				"status":  "success",
-				"domains": d.cfg.Domains,
+				"status":       "success",
+				"domains":      d.cfg.Domains,
+				"cname_target": cnameTarget,
 			})
 			return
 		}
@@ -834,8 +881,9 @@ func (d *Dashboard) handleDomains(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, map[string]interface{}{
-			"status":  "success",
-			"domains": userDomains,
+			"status":       "success",
+			"domains":      userDomains,
+			"cname_target": cnameTarget,
 		})
 
 	case http.MethodPost:
@@ -1074,13 +1122,13 @@ func (d *Dashboard) handleDNSCheck(w http.ResponseWriter, r *http.Request) {
 func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		publicPaths := map[string]bool{
-			"/":                true,
-			"/api/health":      true,
-			"/api/login":       true,
-			"/api/register":    true,
-			"/api/dns/check":   true,
-			"/api/pricing":     true,
-			"/api/docs":        true,
+			"/":              true,
+			"/api/health":    true,
+			"/api/login":     true,
+			"/api/register":  true,
+			"/api/dns/check": true,
+			"/api/pricing":   true,
+			"/api/docs":      true,
 		}
 		if r.Header.Get("X-Sync-Internal") == "true" {
 			next.ServeHTTP(w, r)
@@ -1114,15 +1162,29 @@ func (d *Dashboard) corsMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
-		w.Header().Set("Content-Security-Policy", "default-src 'self' 'unsafe-inline' 'unsafe-eval'; font-src 'self' https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; connect-src 'self'; img-src 'self' data:;")
+		
+		csp := "default-src 'self' 'unsafe-inline' 'unsafe-eval' https://static.cloudflareinsights.com;" +
+			"font-src 'self' https://fonts.gstatic.com;" +
+			"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;" +
+			"script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: cdn.jsdelivr.net https://static.cloudflareinsights.com;" +
+			"connect-src 'self' wss: https:;" +
+			"img-src 'self' data: https: blob:;" +
+			"object-src 'none';" +
+			"base-uri 'self';" +
+			"form-action 'self';"
+
+		w.Header().Set("Content-Security-Policy", csp)
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+		w.Header().Set("Cross-Origin-Embedder-Policy", "require-corp")
+		w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
 
 		origin := r.Header.Get("Origin")
 		if origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "null")
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
@@ -1136,32 +1198,30 @@ func (d *Dashboard) corsMiddleware(next http.Handler) http.Handler {
 
 func writeJSON(w http.ResponseWriter, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 	json.NewEncoder(w).Encode(data)
 }
 
 // StatsAdapter bridges Shield.Stats to StatsProvider
 type StatsAdapter struct {
-	TotalReqs   *int64
-	BlockedReqs *int64
-	PassedReqs  *int64
-	CurrRPS     *int64
-	PkRPS       *int64
-	ActiveCn    *int64
-	BannedIP    *int64
-	AttacksDet  *int64
-	UnderAttack *bool
-	UptimeStart time.Time
-	XDP         func() (bool, int64, int64)
-	EarlyStats  func() (int64, int64)
-	CDNStats    func() (int64, int64, int64)
-	MeshStats   func() (bool, int)
-	MeshMembers func() []cluster.NodeInfo
+	TotalReqs          *int64
+	BlockedReqs        *int64
+	PassedReqs         *int64
+	CurrRPS            *int64
+	PkRPS              *int64
+	ActiveCn           *int64
+	BannedIP           *int64
+	AttacksDet         *int64
+	UnderAttack        *bool
+	UptimeStart        time.Time
+	XDP                func() (bool, int64, int64)
+	EarlyStats         func() (int64, int64)
+	CDNStats           func() (int64, int64, int64)
+	MeshStats          func() (bool, int)
+	MeshMembers        func() []cluster.NodeInfo
 	UnbanFunc          func(ip string)
 	UnbanAll           func()
 	UpdateUpstreamFunc func(domains []config.DomainConfig)
+	GetBannedIPsListFunc func() []BannedIPEntry
 }
 
 func (s *StatsAdapter) GetTotalRequests() int64   { return atomic.LoadInt64(s.TotalReqs) }
@@ -1174,6 +1234,12 @@ func (s *StatsAdapter) GetBannedIPs() int64       { return atomic.LoadInt64(s.Ba
 func (a *StatsAdapter) GetAttacksDetected() int64 { return atomic.LoadInt64(a.AttacksDet) }
 func (a *StatsAdapter) IsUnderAttack() bool       { return *a.UnderAttack }
 func (a *StatsAdapter) GetUptime() time.Time      { return a.UptimeStart }
+func (a *StatsAdapter) GetBannedIPsList() []BannedIPEntry {
+	if a.GetBannedIPsListFunc != nil {
+		return a.GetBannedIPsListFunc()
+	}
+	return nil
+}
 func (a *StatsAdapter) GetXDPStats() (bool, int64, int64) {
 	if a.XDP == nil {
 		return false, 0, 0
@@ -1219,723 +1285,6 @@ func (a *StatsAdapter) UpdateUpstreams(domains []config.DomainConfig) {
 		a.UpdateUpstreamFunc(domains)
 	}
 }
-
-// ================================================
-// Full Dashboard HTML
-// ================================================
-
-var fullDashboardHTML = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mango Shield — Cyber Command Center</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-:root {
-  --bg: #020617;
-  --bg-card: rgba(15, 23, 42, 0.75);
-  --border: rgba(51, 65, 85, 0.6);
-  --border-glow: rgba(6, 182, 212, 0.3);
-  --primary: #10b981;
-  --cyan: #06b6d4;
-  --amber: #f59e0b;
-  --red: #ef4444;
-  --purple: #8b5cf6;
-  --text-main: #f8fafc;
-  --text-muted: #94a3b8;
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-  --font-mono: 'Fira Code', monospace;
-}
-
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body {
-  background: var(--bg);
-  background-image: 
-    radial-gradient(circle at 15% 15%, rgba(16, 185, 129, 0.05) 0%, transparent 40%),
-    radial-gradient(circle at 85% 85%, rgba(6, 182, 212, 0.05) 0%, transparent 40%);
-  color: var(--text-main);
-  font-family: var(--font-sans);
-  min-height: 100vh;
-  overflow-x: hidden;
-}
-
-/* Header Navbar */
-.nav-hdr {
-  background: rgba(15, 23, 42, 0.85);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border-bottom: 1px solid var(--border);
-  padding: 14px 32px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  position: sticky;
-  top: 0;
-  z-index: 100;
-}
-.brand-title {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-size: 19px;
-  font-weight: 700;
-  letter-spacing: -0.5px;
-}
-.brand-title span.logo-icon { font-size: 24px; filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.6)); }
-.brand-title span.ver-tag {
-  font-size: 11px;
-  background: rgba(6, 182, 212, 0.15);
-  color: var(--cyan);
-  border: 1px solid rgba(6, 182, 212, 0.3);
-  padding: 2px 8px;
-  border-radius: 12px;
-  font-family: var(--font-mono);
-}
-
-.hdr-controls { display: flex; align-items: center; gap: 14px; }
-.status-pill {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 16px;
-  border-radius: 20px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.3px;
-  transition: all 0.3s;
-}
-.status-pill.ok {
-  background: rgba(16, 185, 129, 0.12);
-  color: var(--primary);
-  border: 1px solid rgba(16, 185, 129, 0.3);
-  box-shadow: 0 0 12px rgba(16, 185, 129, 0.2);
-}
-.status-pill.atk {
-  background: rgba(239, 68, 68, 0.15);
-  color: var(--red);
-  border: 1px solid rgba(239, 68, 68, 0.4);
-  box-shadow: 0 0 16px rgba(239, 68, 68, 0.4);
-  animation: pulseAlert 1.2s infinite;
-}
-@keyframes pulseAlert { 50% { opacity: 0.6; } }
-
-.dot-indicator { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
-
-.btn-action {
-  background: rgba(30, 41, 59, 0.8);
-  border: 1px solid var(--border);
-  color: var(--text-main);
-  padding: 8px 16px;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  transition: all 0.2s;
-}
-.btn-action:hover {
-  background: rgba(51, 65, 85, 0.8);
-  border-color: var(--cyan);
-  box-shadow: 0 0 12px rgba(6, 182, 212, 0.25);
-}
-
-/* Layout Grid */
-.dashboard-container { padding: 24px 32px; max-width: 1600px; margin: 0 auto; }
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  gap: 16px;
-  margin-bottom: 24px;
-}
-
-.kpi-card {
-  background: var(--bg-card);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 18px 20px;
-  position: relative;
-  overflow: hidden;
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.kpi-card:hover {
-  border-color: var(--border-glow);
-  transform: translateY(-2px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 16px rgba(6, 182, 212, 0.1);
-}
-.kpi-card .kpi-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.8px;
-  margin-bottom: 8px;
-}
-.kpi-card .kpi-val {
-  font-size: 28px;
-  font-weight: 800;
-  font-family: var(--font-mono);
-  color: var(--text-main);
-  line-height: 1.1;
-}
-.kpi-card .kpi-sub {
-  font-size: 11px;
-  color: var(--text-muted);
-  margin-top: 6px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.accent-green .kpi-val { color: var(--primary); text-shadow: 0 0 10px rgba(16, 185, 129, 0.3); }
-.accent-red .kpi-val { color: var(--red); text-shadow: 0 0 10px rgba(239, 68, 68, 0.3); }
-.accent-cyan .kpi-val { color: var(--cyan); text-shadow: 0 0 10px rgba(6, 182, 212, 0.3); }
-.accent-purple .kpi-val { color: var(--purple); text-shadow: 0 0 10px rgba(139, 92, 246, 0.3); }
-
-/* Main Chart Section */
-.panel-box {
-  background: var(--bg-card);
-  backdrop-filter: blur(12px);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 24px;
-  margin-bottom: 24px;
-}
-.panel-hdr {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 18px;
-}
-.panel-hdr h2 {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--text-main);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.chart-container { position: relative; width: 100%; height: 220px; }
-canvas#chart { width: 100% !important; height: 220px !important; }
-
-/* Multi-Column Grid */
-.col-grid-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 20px;
-  margin-bottom: 24px;
-}
-@media (max-width: 900px) { .col-grid-2 { grid-template-columns: 1fr; } }
-
-/* Meter Bars */
-.meter-row { margin-bottom: 16px; }
-.meter-lbl {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-  font-weight: 500;
-  margin-bottom: 6px;
-}
-.meter-track {
-  height: 8px;
-  background: rgba(30, 41, 59, 0.8);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.meter-bar {
-  height: 100%;
-  border-radius: 6px;
-  transition: width 0.4s ease-out;
-}
-.meter-bar.g { background: linear-gradient(90deg, #059669, #10b981); }
-.meter-bar.y { background: linear-gradient(90deg, #d97706, #f59e0b); }
-.meter-bar.r { background: linear-gradient(90deg, #dc2626, #ef4444); }
-
-/* Terminal Events Feed */
-.terminal-box {
-  background: #010409;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 14px 18px;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  max-height: 240px;
-  overflow-y: auto;
-}
-.log-row {
-  padding: 5px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.log-row .log-ts { color: var(--cyan); opacity: 0.8; }
-.log-row.warn { color: var(--amber); }
-.log-row.err { color: var(--red); }
-
-/* Node Mesh Cards */
-.mesh-nodes-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 12px;
-}
-.node-card {
-  background: rgba(30, 41, 59, 0.5);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.node-card .n-info { display: flex; flex-direction: column; }
-.node-card .n-name { font-weight: 600; font-size: 13px; color: var(--text-main); }
-.node-card .n-addr { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
-.node-card .n-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 8px var(--primary); }
-
-/* Modal */
-.modal-scrim {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(2, 6, 23, 0.75);
-  backdrop-filter: blur(8px);
-  display: none;
-  align-items: center;
-  justify-content: center;
-  z-index: 200;
-}
-.modal-content {
-  background: #0f172a;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  width: 400px;
-  padding: 24px;
-  box-shadow: 0 20px 40px rgba(0,0,0,0.6);
-}
-.modal-hdr { font-size: 16px; font-weight: 700; margin-bottom: 12px; }
-.modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
-
-/* Footer */
-.footer-bar {
-  text-align: center;
-  padding: 24px;
-  color: var(--text-muted);
-  font-size: 12px;
-  border-top: 1px solid rgba(51, 65, 85, 0.3);
-}
-
-/* ======================== RESPONSIVE ======================== */
-@media (max-width: 768px) {
-  .nav-hdr { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
-  .brand-title { font-size: 16px; }
-  .brand-title span.ver-tag { display: none; }
-  .hdr-controls { width: 100%; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
-  .dashboard-container { padding: 16px 12px; }
-  .kpi-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
-  .kpi-card .kpi-val { font-size: 22px; }
-  .chart-container { height: 160px; }
-  canvas#chart { height: 160px !important; }
-  .col-grid-2 { grid-template-columns: 1fr; }
-  .terminal-box { max-height: 180px; font-size: 11px; }
-  .modal-content { width: calc(100% - 32px); max-width: 400px; }
-  .mesh-nodes-grid { grid-template-columns: 1fr; }
-}
-@media (max-width: 480px) {
-  .kpi-grid { grid-template-columns: 1fr; }
-  .kpi-card .kpi-val { font-size: 20px; }
-  .nav-hdr { padding: 8px; }
-  .btn-action { padding: 6px 10px; font-size: 12px; }
-  .status-pill { font-size: 11px; padding: 4px 10px; }
-}
-</style>
-</head>
-<body>
-
-<header class="nav-hdr">
-  <div class="brand-title">
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#06b6d4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-    <span>MANGO SHIELD</span>
-    <span class="ver-tag">v2.0 ENTERPRISE</span>
-  </div>
-  <div class="hdr-controls">
-    <div class="status-pill ok" id="st">
-      <div class="dot-indicator"></div>
-      <span id="st_text">SYSTEM NORMAL</span>
-    </div>
-    <button class="btn-action" style="background:rgba(239, 68, 68, 0.15);border-color:rgba(239, 68, 68, 0.4);color:#ef4444" onclick="executeUnbanAll()">Unban All IPs</button>
-    <button class="btn-action" onclick="openPurgeModal()">Purge Cache</button>
-    <button class="btn-action" onclick="updateStats()">Refresh</button>
-  </div>
-</header>
-
-<main class="dashboard-container">
-
-  <!-- KPI Grid -->
-  <section class="kpi-grid">
-    <div class="kpi-card accent-cyan">
-      <div class="kpi-label">Current RPS</div>
-      <div class="kpi-val" id="rps">0</div>
-      <div class="kpi-sub">req / second</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Total Requests</div>
-      <div class="kpi-val" id="total">0</div>
-      <div class="kpi-sub">inspected traffic</div>
-    </div>
-    <div class="kpi-card accent-red">
-      <div class="kpi-label">Blocked Threats</div>
-      <div class="kpi-val" id="blocked">0</div>
-      <div class="kpi-sub">WAF / L7 mitigations</div>
-    </div>
-    <div class="kpi-card accent-green">
-      <div class="kpi-label">Passed Traffic</div>
-      <div class="kpi-val" id="passed">0</div>
-      <div class="kpi-sub">clean origin requests</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Peak RPS</div>
-      <div class="kpi-val" id="peak">0</div>
-      <div class="kpi-sub">highest throughput</div>
-    </div>
-    <div class="kpi-card">
-      <div class="kpi-label">Active Connections</div>
-      <div class="kpi-val" id="conns">0</div>
-      <div class="kpi-sub">concurrent sockets</div>
-    </div>
-    <div class="kpi-card accent-red">
-      <div class="kpi-label">Banned IPs</div>
-      <div class="kpi-val" id="banned">0</div>
-      <div class="kpi-sub">active blacklists</div>
-    </div>
-    <div class="kpi-card accent-purple">
-      <div class="kpi-label">eBPF / XDP Drops</div>
-      <div class="kpi-val" id="xdp_drops">0</div>
-      <div class="kpi-sub" id="xdp_st">NIC Kernel Dropper</div>
-    </div>
-  </section>
-
-  <!-- Real-time Chart Panel -->
-  <section class="panel-box">
-    <div class="panel-hdr">
-      <h2>Real-Time Traffic & Threat Telemetry (5 min window)</h2>
-      <span class="ver-tag" style="background:rgba(6,182,212,0.15);color:var(--cyan)" id="chart_badge">0 RPS Current</span>
-    </div>
-    <div class="chart-container">
-      <canvas id="chart"></canvas>
-    </div>
-  </section>
-
-  <!-- Dual Status Panels -->
-  <section class="col-grid-2">
-    <div class="panel-box">
-      <div class="panel-hdr">
-        <h2>Subsystem Health & Load Matrix</h2>
-      </div>
-      <div class="meter-row">
-        <div class="meter-lbl"><span>WAF Threat Mitigation Rate</span><span id="br">0%</span></div>
-        <div class="meter-track"><div class="meter-bar g" id="brm" style="width:0%"></div></div>
-      </div>
-      <div class="meter-row">
-        <div class="meter-lbl"><span>Socket Connection Capacity</span><span id="cl">0%</span></div>
-        <div class="meter-track"><div class="meter-bar g" id="clm" style="width:0%"></div></div>
-      </div>
-      <div class="meter-row">
-        <div class="meter-lbl"><span>Engine System Uptime</span><span id="up" style="font-family:var(--font-mono);color:var(--cyan)">0s</span></div>
-      </div>
-    </div>
-
-    <div class="panel-box">
-      <div class="panel-hdr">
-        <h2>Security & Threat Audit Stream</h2>
-      </div>
-      <div class="terminal-box" id="logs">
-        <div class="log-row"><span class="log-ts">--:--:--</span>Initializing Mango Command Center...</div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Cluster Network Section -->
-  <section class="panel-box">
-    <div class="panel-hdr">
-      <h2>Mango Mesh P2P Cluster Nodes</h2>
-      <span class="ver-tag" style="background:rgba(16,185,129,0.15);color:var(--primary)" id="mesh_count">0 Nodes Active</span>
-    </div>
-    <div class="mesh-nodes-grid" id="mesh_nodes_list">
-      <!-- Node cards injected here -->
-    </div>
-  </section>
-
-</main>
-
-<div class="modal-scrim" id="purgeModal">
-  <div class="modal-content">
-    <div class="modal-hdr">Purge RAM Cache</div>
-    <p style="font-size:13px;color:var(--text-muted);margin-bottom:14px">Purge in-memory static assets from Ristretto CDN cache store?</p>
-    <div class="modal-actions">
-      <button class="btn-action" onclick="closePurgeModal()">Cancel</button>
-      <button class="btn-action" style="background:var(--red);border-color:var(--red)" onclick="executePurge()">Confirm Purge</button>
-    </div>
-  </div>
-</div>
-
-<footer class="footer-bar">
-  Mango Shield v2.0 Enterprise WAF & DDoS Protection Engine • Built with Go & eBPF
-</footer>
-
-<script>
-var chart = document.getElementById('chart'), ctx = chart.getContext('2d');
-var rpsData = new Array(300).fill(0), maxY = 10, logs = [];
-
-function resizeCanvas() {
-  if (!chart) return;
-  var pW = (chart.parentElement && chart.parentElement.clientWidth > 50) ? chart.parentElement.clientWidth : 800;
-  chart.width = pW;
-  chart.height = 220;
-  drawChart();
-}
-window.addEventListener('resize', resizeCanvas);
-
-function fmt(n) {
-  if (n === undefined || n === null || isNaN(n)) return '0';
-  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return n.toString();
-}
-function fmtTime(s) {
-  if (!s || isNaN(s)) return '0s';
-  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return h > 0 ? h + 'h ' + m + 'm' : m > 0 ? m + 'm' : Math.floor(s) + 's';
-}
-
-var hoverX = -1;
-
-function drawChart() {
-  if (!chart) return;
-  var pW = (chart.parentElement && chart.parentElement.clientWidth > 50) ? chart.parentElement.clientWidth : 800;
-  if (chart.width !== pW) {
-    chart.width = pW;
-    chart.height = 240;
-  }
-  var w = chart.width, h = chart.height;
-  var paddingLeft = 55, paddingBottom = 25, paddingTop = 15, paddingRight = 15;
-  var graphW = w - paddingLeft - paddingRight;
-  var graphH = h - paddingTop - paddingBottom;
-
-  ctx.clearRect(0, 0, w, h);
-  maxY = Math.max(10, ...rpsData) * 1.25;
-
-  // Grid Lines & Y-Axis Labels
-  ctx.strokeStyle = 'rgba(51, 65, 85, 0.4)';
-  ctx.fillStyle = '#94a3b8';
-  ctx.font = '10px "Fira Code", monospace';
-  ctx.textAlign = 'right';
-  ctx.textBaseline = 'middle';
-  ctx.lineWidth = 1;
-
-  for (var i = 0; i <= 4; i++) {
-    var val = (maxY * (4 - i) / 4);
-    var y = paddingTop + (graphH * (i / 4));
-    ctx.beginPath(); ctx.moveTo(paddingLeft, y); ctx.lineTo(w - paddingRight, y); ctx.stroke();
-    ctx.fillText(fmt(Math.round(val)), paddingLeft - 8, y);
-  }
-
-  // X-Axis Time Labels
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  var timeLabels = ['-5m', '-4m', '-3m', '-2m', '-1m', 'NOW'];
-  for (var i = 0; i < timeLabels.length; i++) {
-    var x = paddingLeft + (graphW * (i / (timeLabels.length - 1)));
-    ctx.fillText(timeLabels[i], x, h - paddingBottom + 6);
-  }
-
-  // Gradient Area Fill
-  var grad = ctx.createLinearGradient(0, paddingTop, 0, h - paddingBottom);
-  grad.addColorStop(0, 'rgba(6, 182, 212, 0.35)');
-  grad.addColorStop(1, 'rgba(6, 182, 212, 0.0)');
-  ctx.fillStyle = grad;
-  ctx.beginPath();
-  ctx.moveTo(paddingLeft, h - paddingBottom);
-  for (var i = 0; i < rpsData.length; i++) {
-    var x = paddingLeft + (i / (rpsData.length - 1)) * graphW;
-    var y = h - paddingBottom - (rpsData[i] / maxY) * graphH;
-    ctx.lineTo(x, y);
-  }
-  ctx.lineTo(w - paddingRight, h - paddingBottom);
-  ctx.closePath();
-  ctx.fill();
-
-  // Line Path
-  ctx.strokeStyle = '#06b6d4';
-  ctx.lineWidth = 2.5;
-  ctx.beginPath();
-  for (var i = 0; i < rpsData.length; i++) {
-    var x = paddingLeft + (i / (rpsData.length - 1)) * graphW;
-    var y = h - paddingBottom - (rpsData[i] / maxY) * graphH;
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-  }
-  ctx.stroke();
-
-  // Interactive Hover Crosshair & Tooltip
-  if (hoverX >= paddingLeft && hoverX <= w - paddingRight) {
-    var idx = Math.round(((hoverX - paddingLeft) / graphW) * (rpsData.length - 1));
-    if (idx >= 0 && idx < rpsData.length) {
-      var val = rpsData[idx];
-      var x = paddingLeft + (idx / (rpsData.length - 1)) * graphW;
-      var y = h - paddingBottom - (val / maxY) * graphH;
-
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath(); ctx.moveTo(x, paddingTop); ctx.lineTo(x, h - paddingBottom); ctx.stroke();
-      ctx.setLineDash([]);
-
-      ctx.fillStyle = '#06b6d4';
-      ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI * 2); ctx.fill();
-
-      var label = fmt(val) + ' RPS';
-      var secAgo = Math.round((300 - idx));
-      var timeSub = secAgo <= 1 ? 'Just now' : secAgo + 's ago';
-      ctx.font = '11px "Inter", sans-serif';
-      var tw = Math.max(ctx.measureText(label).width, ctx.measureText(timeSub).width) + 16;
-      var tx = x + 10;
-      if (tx + tw > w - 10) tx = x - tw - 10;
-      var ty = y - 30;
-      if (ty < paddingTop) ty = y + 10;
-
-      ctx.fillStyle = 'rgba(15, 23, 42, 0.95)';
-      ctx.strokeStyle = '#06b6d4';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      if (ctx.roundRect) { ctx.roundRect(tx, ty, tw, 36, 6); } else { ctx.rect(tx, ty, tw, 36); }
-      ctx.fill(); ctx.stroke();
-
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 11px "Fira Code", monospace';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText(label, tx + 8, ty + 6);
-
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '10px "Inter", sans-serif';
-      ctx.fillText(timeSub, tx + 8, ty + 20);
-    }
-  }
-}
-
-chart.addEventListener('mousemove', function(e) {
-  var rect = chart.getBoundingClientRect();
-  hoverX = e.clientX - rect.left;
-  drawChart();
-});
-chart.addEventListener('mouseleave', function() {
-  hoverX = -1;
-  drawChart();
-});
-
-function addLog(msg, type) {
-  var t = new Date().toLocaleTimeString();
-  logs.unshift({ t: t, msg: msg, type: type || '' });
-  if (logs.length > 10) logs.pop();
-  var el = document.getElementById('logs');
-  el.innerHTML = '';
-  logs.forEach(function(l) {
-    el.innerHTML += '<div class="log-row ' + l.type + '"><span class="log-ts">' + l.t + '</span>' + l.msg + '</div>';
-  });
-}
-
-var lastBlocked = 0, lastAttacks = 0, wasAttack = false;
-
-function updateStats() {
-  fetch('/api/stats').then(function(r) { return r.json(); }).then(function(d) {
-    document.getElementById('rps').textContent = fmt(d.current_rps);
-    document.getElementById('chart_badge').textContent = fmt(d.current_rps) + ' RPS Current';
-    document.getElementById('total').textContent = fmt(d.total_requests);
-    document.getElementById('blocked').textContent = fmt(d.blocked_requests);
-    document.getElementById('passed').textContent = fmt(d.passed_requests);
-    document.getElementById('peak').textContent = fmt(d.peak_rps);
-    document.getElementById('conns').textContent = fmt(d.active_conns);
-    document.getElementById('banned').textContent = fmt(d.active_bans || d.banned_ips || 0);
-    document.getElementById('xdp_drops').textContent = fmt(d.xdp_dropped_pkts);
-    document.getElementById('up').textContent = fmtTime(d.uptime_seconds);
-
-    var xst = document.getElementById('xdp_st');
-    if (d.xdp_enabled) { xst.textContent = 'Active (sys_bpf)'; xst.style.color = 'var(--primary)'; }
-    else { xst.textContent = 'Disabled'; xst.style.color = 'var(--text-muted)'; }
-
-    var st = document.getElementById('st');
-    var stText = document.getElementById('st_text');
-    if (d.is_under_attack) {
-      st.className = 'status-pill atk';
-      stText.textContent = 'DDoS ATTACK ACTIVE';
-    } else {
-      st.className = 'status-pill ok';
-      stText.textContent = 'SYSTEM NORMAL';
-    }
-
-    var br = d.total_requests > 0 ? Math.round((d.blocked_requests / d.total_requests) * 100) : 0;
-    document.getElementById('br').textContent = br + '%';
-    var brm = document.getElementById('brm');
-    brm.style.width = br + '%';
-    brm.className = 'meter-bar ' + (br > 50 ? 'r' : br > 20 ? 'y' : 'g');
-
-    var cl = Math.min(100, Math.round(((d.active_conns || 0) / 10000) * 100));
-    document.getElementById('cl').textContent = cl + '%';
-    var clm = document.getElementById('clm');
-    clm.style.width = cl + '%';
-    clm.className = 'meter-bar ' + (cl > 80 ? 'r' : cl > 50 ? 'y' : 'g');
-
-    if (d.blocked_requests > lastBlocked + 5) { addLog('Blocked ' + (d.blocked_requests - lastBlocked) + ' malicious requests', 'warn'); }
-    if (d.attacks_detected > lastAttacks) { addLog('New attack vectors detected!', 'err'); }
-    lastBlocked = d.blocked_requests; lastAttacks = d.attacks_detected;
-
-    document.getElementById('mesh_count').textContent = (d.mesh_nodes || 0) + ' Nodes Active';
-    var meshList = document.getElementById('mesh_nodes_list');
-    meshList.innerHTML = '';
-    if (d.mesh_members && d.mesh_members.length > 0) {
-      d.mesh_members.forEach(function(m) {
-        meshList.innerHTML += '<div class="node-card">' +
-          '<div class="n-info"><span class="n-name">' + m.name + '</span><span class="n-addr">' + m.addr + '</span></div>' +
-          '<div class="n-pulse"></div></div>';
-      });
-    } else {
-      meshList.innerHTML = '<div style="font-size:12px;color:var(--text-muted);text-align:center;padding:16px;grid-column:1/-1">No external Mesh nodes joined. Single edge mode active.</div>';
-    }
-  }).catch(function() {});
-
-  fetch('/api/rps-history').then(function(r) { return r.json(); }).then(function(d) {
-    if (d && d.rps) { rpsData = d.rps; drawChart(); }
-  }).catch(function() {});
-}
-
-function openPurgeModal() { document.getElementById('purgeModal').style.display = 'flex'; }
-function closePurgeModal() { document.getElementById('purgeModal').style.display = 'none'; }
-function executePurge() {
-  fetch('/api/cache/purge', { method: 'POST' }).then(function(r) { return r.json(); }).then(function() {
-    addLog('CDN RAM Cache purged successfully', 'g');
-    closePurgeModal();
-  });
-}
-function executeUnbanAll() {
-  if (confirm('Unban all blacklisted IPs across the entire P2P Mesh cluster?')) {
-    fetch('/api/unban?ip=all').then(function(r) { return r.json(); }).then(function(d) {
-      addLog('ALL blacklisted IPs unbanned across P2P Mesh cluster', 'warn');
-      updateStats();
-    }).catch(function(err) { console.error(err); });
-  }
-}
-
-resizeCanvas();
-updateStats();
-setInterval(updateStats, 1000);
-</script>
-</html>`
 
 func (d *Dashboard) handleUnban(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -2418,12 +1767,20 @@ func (d *Dashboard) handleDomainProtectionMode(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Save to Storage center to persist it
+	st := GetStorage()
+	st.mu.Lock()
+	st.Data.Domains = d.cfg.Domains
+	st.mu.Unlock()
+	_ = st.Save()
+
 	// Save via Configuration Center & Hot Reload
 	modeLabel := req.ProtectionMode
 	if modeLabel == "" {
 		modeLabel = "global (inherit)"
 	}
 	_ = config.GetCenter().UpdateConfig(d.cfg, username, role, fmt.Sprintf("Set protection mode for %s to %s", req.Domain, modeLabel))
+	go d.broadcastConfigToPeers(config.GetCenter().GetRawYAML(), username, fmt.Sprintf("Set protection mode for %s to %s", req.Domain, modeLabel))
 
 	GetAuditLogger().LogAction(username, role, "DOMAIN_PROTECTION_MODE", "security", req.Domain, fmt.Sprintf("Mode: %s", modeLabel), clientIP, "success")
 	writeJSON(w, map[string]interface{}{"status": "success", "message": fmt.Sprintf("Protection mode for %s set to %s", req.Domain, modeLabel)})
@@ -2433,18 +1790,24 @@ func (d *Dashboard) handleSecurityRules(w http.ResponseWriter, r *http.Request) 
 	username, role := d.getUserFromRequest(r)
 	clientIP := getClientIP(r)
 
+	// Single Source of Truth: Always load latest config from ConfigCenter
+	currentCfg := config.GetCenter().GetConfig()
+	if currentCfg == nil {
+		currentCfg = d.cfg
+	}
+
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, map[string]interface{}{
-			"status":             "success",
-			"protection_mode":    d.cfg.Protection.Mode,
-			"paranoia_level":     d.cfg.WAF.ParanoiaLevel,
-			"owasp_rules":        d.cfg.WAF.OWASPRules,
-			"whitelist_ips":      d.cfg.Protection.WhitelistIPs,
-			"rate_limit":         d.cfg.Protection.RateLimit,
-			"pow_difficulty":     d.cfg.Protection.Challenge.PowDifficulty,
-			"blocked_countries":  d.cfg.Intelligence.GeoIP.BlockedCountries,
-			"block_datacenter":   d.cfg.Intelligence.ASN.BlockDatacenter,
+			"status":            "success",
+			"protection_mode":   currentCfg.Protection.Mode,
+			"paranoia_level":    currentCfg.WAF.ParanoiaLevel,
+			"owasp_rules":       currentCfg.WAF.OWASPRules,
+			"whitelist_ips":     currentCfg.Protection.WhitelistIPs,
+			"rate_limit":        currentCfg.Protection.RateLimit,
+			"pow_difficulty":    currentCfg.Protection.Challenge.PowDifficulty,
+			"blocked_countries": currentCfg.Intelligence.GeoIP.BlockedCountries,
+			"block_datacenter":  currentCfg.Intelligence.ASN.BlockDatacenter,
 		})
 
 	case http.MethodPost, http.MethodPut:
@@ -2470,37 +1833,42 @@ func (d *Dashboard) handleSecurityRules(w http.ResponseWriter, r *http.Request) 
 		}
 
 		if req.ProtectionMode != "" {
-			d.cfg.Protection.Mode = req.ProtectionMode
+			currentCfg.Protection.Mode = req.ProtectionMode
 		}
 		if req.ParanoiaLevel >= 1 && req.ParanoiaLevel <= 4 {
-			d.cfg.WAF.ParanoiaLevel = req.ParanoiaLevel
+			currentCfg.WAF.ParanoiaLevel = req.ParanoiaLevel
 		}
 		if req.OWASPRules != nil {
-			d.cfg.WAF.OWASPRules = *req.OWASPRules
+			currentCfg.WAF.OWASPRules = *req.OWASPRules
 		}
 		if req.WhitelistIPs != nil {
-			d.cfg.Protection.WhitelistIPs = req.WhitelistIPs
+			currentCfg.Protection.WhitelistIPs = req.WhitelistIPs
 		}
 		if req.RPS > 0 {
-			d.cfg.Protection.RateLimit.RequestsPerSecond = req.RPS
+			currentCfg.Protection.RateLimit.RequestsPerSecond = req.RPS
 		}
 		if req.Burst > 0 {
-			d.cfg.Protection.RateLimit.Burst = req.Burst
+			currentCfg.Protection.RateLimit.Burst = req.Burst
 		}
 		if req.PowDifficulty > 0 {
-			d.cfg.Protection.Challenge.PowDifficulty = req.PowDifficulty
+			currentCfg.Protection.Challenge.PowDifficulty = req.PowDifficulty
 		}
 		if req.BlockedCountries != nil {
-			d.cfg.Intelligence.GeoIP.BlockedCountries = req.BlockedCountries
+			currentCfg.Intelligence.GeoIP.BlockedCountries = req.BlockedCountries
 		}
 		if req.BlockDatacenter != nil {
-			d.cfg.Intelligence.ASN.BlockDatacenter = *req.BlockDatacenter
+			currentCfg.Intelligence.ASN.BlockDatacenter = *req.BlockDatacenter
 		}
 
-		// Save via Configuration Center & Hot Reload
-		_ = config.GetCenter().UpdateConfig(d.cfg, username, role, "Updated global security policies")
+		// Save via Configuration Center & Hot Reload across all engines
+		err := config.GetCenter().UpdateConfig(currentCfg, username, role, fmt.Sprintf("Updated WAF Security Policies (RPS: %d, Burst: %d, Mode: %s)", currentCfg.Protection.RateLimit.RequestsPerSecond, currentCfg.Protection.RateLimit.Burst, currentCfg.Protection.Mode))
+		if err != nil {
+			writeJSON(w, map[string]interface{}{"status": "error", "message": err.Error()})
+			return
+		}
+		d.cfg = currentCfg
 
-		GetAuditLogger().LogAction(username, role, "SECURITY_UPDATE", "security", "global", fmt.Sprintf("Mode: %s, Paranoia: %d, RPS: %d", d.cfg.Protection.Mode, d.cfg.WAF.ParanoiaLevel, d.cfg.Protection.RateLimit.RequestsPerSecond), clientIP, "success")
+		GetAuditLogger().LogAction(username, role, "SECURITY_UPDATE", "security", "global", fmt.Sprintf("Mode: %s, Paranoia: %d, RPS: %d, Burst: %d", currentCfg.Protection.Mode, currentCfg.WAF.ParanoiaLevel, currentCfg.Protection.RateLimit.RequestsPerSecond, currentCfg.Protection.RateLimit.Burst), clientIP, "success")
 		writeJSON(w, map[string]interface{}{"status": "success", "message": "Security rules updated & hot-reloaded successfully"})
 	}
 }
@@ -2529,10 +1897,10 @@ func (d *Dashboard) handleClusterSync(w http.ResponseWriter, r *http.Request) {
 
 		GetAuditLogger().LogAction(username, role, "CLUSTER_SYNC", "cluster", "all_nodes", fmt.Sprintf("Manual cluster sync triggered across %d nodes", numNodes), clientIP, "success")
 		writeJSON(w, map[string]interface{}{
-			"status":   "success",
-			"message":  fmt.Sprintf("Cluster config sync broadcasted across %d active mesh nodes", numNodes),
-			"nodes":    numNodes,
-			"members":  members,
+			"status":  "success",
+			"message": fmt.Sprintf("Cluster config sync broadcasted across %d active mesh nodes", numNodes),
+			"nodes":   numNodes,
+			"members": members,
 		})
 		return
 	}
@@ -2582,10 +1950,112 @@ func (d *Dashboard) handleNodes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	type ResponseNode struct {
+		Name      string  `json:"name"`
+		Addr      string  `json:"addr"`
+		IP        string  `json:"ip"`
+		Latitude  float64 `json:"latitude"`
+		Longitude float64 `json:"longitude"`
+	}
+
+	var resNodes []ResponseNode
+	gp, _ := intelligence.NewGeoProvider("")
+	for _, n := range nodes {
+		ip := n.Addr
+		if host, _, err := net.SplitHostPort(n.Addr); err == nil && host != "" {
+			ip = host
+		}
+
+		// Try to extract public IP from node name if it contains one
+		for _, part := range strings.Split(n.Name, "-") {
+			if net.ParseIP(part) != nil {
+				ip = part
+				break
+			}
+		}
+
+		// Check if IP is private/local
+		parsedIP := net.ParseIP(ip)
+		isPrivate := false
+		if parsedIP != nil {
+			ip4 := parsedIP.To4()
+			if ip4 != nil {
+				if ip4[0] == 127 || ip4[0] == 10 || (ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31) || (ip4[0] == 192 && ip4[1] == 168) {
+					isPrivate = true
+				}
+			} else {
+				isPrivate = true
+			}
+		} else {
+			isPrivate = true
+		}
+
+		// Map private IP to its public JoinPeer counterpart if available
+		if isPrivate && len(d.cfg.Cluster.JoinPeers) > 0 {
+			peerIdx := 0
+			for i, member := range nodes {
+				if member.Name == n.Name {
+					peerIdx = i
+					break
+				}
+			}
+			if peerIdx >= len(d.cfg.Cluster.JoinPeers) {
+				peerIdx = len(d.cfg.Cluster.JoinPeers) - 1
+			}
+			peerStr := d.cfg.Cluster.JoinPeers[peerIdx]
+			host, _, err := net.SplitHostPort(peerStr)
+			if err == nil && host != "" {
+				ip = host
+			} else if peerStr != "" {
+				ip = peerStr
+			}
+		}
+
+		lat, lon := 0.0, 0.0
+		if gp != nil {
+			if geo, err := gp.Lookup(ip); err == nil {
+				lat = geo.Latitude
+				lon = geo.Longitude
+			}
+		}
+
+		// Fallback default coordinates if GeoIP still returns 0 or private IP
+		if lat == 0 && lon == 0 {
+			nodeIdx := 0
+			for i, member := range nodes {
+				if member.Name == n.Name {
+					nodeIdx = i
+					break
+				}
+			}
+			
+			fallbacks := []struct {
+				Lat float64
+				Lon float64
+			}{
+				{Lat: 21.0285, Lon: 105.8542}, // Hanoi
+				{Lat: 10.8231, Lon: 106.6297}, // HCMC
+				{Lat: 16.0544, Lon: 108.2022}, // Da Nang
+			}
+			
+			fb := fallbacks[nodeIdx%len(fallbacks)]
+			lat = fb.Lat
+			lon = fb.Lon
+		}
+
+		resNodes = append(resNodes, ResponseNode{
+			Name:      n.Name,
+			Addr:      n.Addr,
+			IP:        ip,
+			Latitude:  lat,
+			Longitude: lon,
+		})
+	}
+
 	writeJSON(w, map[string]interface{}{
 		"status": "success",
-		"nodes":  nodes,
-		"total":  len(nodes),
+		"nodes":  resNodes,
+		"total":  len(resNodes),
 	})
 }
 
@@ -2605,10 +2075,10 @@ func (d *Dashboard) handleLogsQuery(w http.ResponseWriter, r *http.Request) {
 
 	if exportFormat == "csv" {
 		var sb strings.Builder
-		sb.WriteString("Timestamp,Type,ClientIP,Domain,Method,Path,Status,Action,Rule,Description\n")
+		sb.WriteString("Timestamp,Type,ClientIP,Country,Domain,Method,Path,Status,Action,Rule,Description\n")
 		for _, l := range realLogs {
-			sb.WriteString(fmt.Sprintf("\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%s\",\"%s\",\"%s\"\n",
-				l.Timestamp, l.Type, l.ClientIP, l.Domain, l.Method, l.Path, l.Status, l.Action, l.Rule, escapeCSV(l.Desc),
+			sb.WriteString(fmt.Sprintf("\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%s\",\"%d\",\"%s\",\"%s\",\"%s\"\n",
+				l.Timestamp, l.Type, l.ClientIP, l.CountryCode, l.Domain, l.Method, l.Path, l.Status, l.Action, l.Rule, escapeCSV(l.Desc),
 			))
 		}
 		w.Header().Set("Content-Type", "text/csv")
@@ -2629,6 +2099,28 @@ func (d *Dashboard) handleLogsClear(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{"status": "success", "message": "Log store cleared"})
 }
 
+// handleFirewallBans returns the real-time list of banned IPs from the pipeline's sync.Map
+func (d *Dashboard) handleFirewallBans(w http.ResponseWriter, r *http.Request) {
+	_, role := d.getUserFromRequest(r)
+	if !CanViewLogs(role) {
+		writeJSON(w, map[string]interface{}{"status": "error", "message": "Access Denied"})
+		return
+	}
+
+	var entries []BannedIPEntry
+	if d.stats != nil {
+		entries = d.stats.GetBannedIPsList()
+	}
+	if entries == nil {
+		entries = []BannedIPEntry{}
+	}
+	writeJSON(w, map[string]interface{}{
+		"status":  "success",
+		"bans":    entries,
+		"total":   len(entries),
+	})
+}
+
 func getClientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		parts := strings.Split(xff, ",")
@@ -2643,3 +2135,121 @@ func getClientIP(r *http.Request) string {
 	}
 	return r.RemoteAddr
 }
+
+func (d *Dashboard) handleLogoMango(w http.ResponseWriter, r *http.Request) {
+	if _, err := os.Stat("logo-mango.png"); err == nil {
+		w.Header().Set("Content-Type", "image/png")
+		http.ServeFile(w, r, "logo-mango.png")
+		return
+	}
+	if _, err := os.Stat("../logo-mango.png"); err == nil {
+		w.Header().Set("Content-Type", "image/png")
+		http.ServeFile(w, r, "../logo-mango.png")
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="32" height="32"><defs><linearGradient id="mGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient><linearGradient id="lGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad)"/></svg>`))
+}
+
+func (d *Dashboard) handleLogoMangoSmall(w http.ResponseWriter, r *http.Request) {
+	if _, err := os.Stat("logo-mango-small.png"); err == nil {
+		w.Header().Set("Content-Type", "image/png")
+		http.ServeFile(w, r, "logo-mango-small.png")
+		return
+	}
+	if _, err := os.Stat("../logo-mango-small.png"); err == nil {
+		w.Header().Set("Content-Type", "image/png")
+		http.ServeFile(w, r, "../logo-mango-small.png")
+		return
+	}
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="24" height="24"><defs><linearGradient id="mGrad2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="100%" stop-color="#FFC107"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad2)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="#4CAF50"/></svg>`))
+}
+
+func (d *Dashboard) handleAttackStream(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	geoProvider, _ := intelligence.NewGeoProvider("")
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	// Track the last emitted event's ID to avoid re-sending duplicates
+	var lastSentID uint64
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			logs := core.GetLogStore().QueryLogs("", "", "")
+			if len(logs) == 0 {
+				continue
+			}
+
+			// Only send events newer than what we last sent
+			var newEvents []map[string]interface{}
+
+			for i := 0; i < len(logs) && i < 50; i++ {
+				l := logs[i]
+				if lastSentID > 0 && l.ID <= lastSentID {
+					break // we reached previously-sent events
+				}
+				geo, _ := geoProvider.Lookup(l.ClientIP)
+				newEvents = append(newEvents, map[string]interface{}{
+					"ip":          l.ClientIP,
+					"country":     geo.Country,
+					"countryCode": geo.CountryCode,
+					"city":        geo.City,
+					"latitude":    geo.Latitude,
+					"longitude":   geo.Longitude,
+					"action":      l.Action,
+					"type":        l.Type,
+					"rule":        l.Rule,
+					"domain":      l.Domain,
+					"path":        l.Path,
+					"status":      l.Status,
+					"timestamp":   l.Timestamp,
+				})
+			}
+
+			if len(newEvents) > 0 {
+				// Record the ID of the newest event for dedup next round
+				lastSentID = logs[0].ID
+				data, _ := json.Marshal(newEvents)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			}
+		}
+	}
+}
+
+func (d *Dashboard) handleWorldSVG(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400") // cache for 1 day
+	
+	// Serve local world.svg if exists
+	if _, err := os.Stat("world.svg"); err == nil {
+		http.ServeFile(w, r, "world.svg")
+		return
+	}
+	if _, err := os.Stat("../world.svg"); err == nil {
+		http.ServeFile(w, r, "../world.svg")
+		return
+	}
+	
+	// Fallback to empty tiny SVG if not found
+	w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 857" width="2000" height="857"><rect width="2000" height="857" fill="#020617"/></svg>`))
+}
+
+

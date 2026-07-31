@@ -231,7 +231,7 @@ func main() {
 	go fetchMetrics()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/logo-mango.png", func(w http.ResponseWriter, r *http.Request) {
+	handleLogo := func(w http.ResponseWriter, r *http.Request) {
 		if _, err := os.Stat("logo-mango.png"); err == nil {
 			w.Header().Set("Content-Type", "image/png")
 			http.ServeFile(w, r, "logo-mango.png")
@@ -245,7 +245,11 @@ func main() {
 		w.Header().Set("Content-Type", "image/svg+xml")
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="32" height="32"><defs><linearGradient id="mGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient><linearGradient id="lGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad)"/></svg>`))
-	})
+	}
+
+	mux.HandleFunc("/logo-mango.png", handleLogo)
+	mux.HandleFunc("/favicon.ico", handleLogo)
+	mux.HandleFunc("/apple-touch-icon.png", handleLogo)
 	mux.HandleFunc("/logo-mango-small.png", func(w http.ResponseWriter, r *http.Request) {
 		if _, err := os.Stat("logo-mango-small.png"); err == nil {
 			w.Header().Set("Content-Type", "image/png")
@@ -354,6 +358,9 @@ var htmlPage = `<!DOCTYPE html>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Mango Shield WAF — Enterprise Security Platform</title>
     <meta name="description" content="Mango Shield WAF - Enterprise L7 DDoS Protection and Web Application Firewall">
+    <link rel="icon" type="image/svg+xml" href="/logo-mango.png">
+    <link rel="shortcut icon" href="/favicon.ico">
+    <link rel="apple-touch-icon" href="/logo-mango.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -805,7 +812,7 @@ body {
 <nav class="navbar">
   <div class="nav-inner">
     <a class="nav-brand" href="javascript:void(0)">
-      <img src="/logo-mango.png" alt="Mango Shield" style="width:28px;height:28px;object-fit:contain">
+      <svg width="28" height="28" viewBox="0 0 100 100" style="flex-shrink:0"><defs><linearGradient id="tsMGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient><linearGradient id="tsLGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#tsMGrad)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#tsLGrad)"/></svg>
       <span>MANGO SHIELD</span>
       <span class="nav-ver">v2.0</span>
     </a>

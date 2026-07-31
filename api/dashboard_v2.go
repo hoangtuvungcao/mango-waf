@@ -13,6 +13,9 @@ var managementPlatformHTML = `<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Mango Shield — Free Enterprise WAF Protection</title>
 <meta name="description" content="Mango Shield WAF - Enterprise-grade Web Application Firewall. Free DDoS protection, SSL management, real-time traffic analytics. Protect your website now.">
+<link rel="icon" type="image/svg+xml" href="/logo-mango.png">
+<link rel="shortcut icon" href="/favicon.ico">
+<link rel="apple-touch-icon" href="/logo-mango.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=Fira+Code:wght@400;500;600&display=swap" rel="stylesheet">
@@ -52,6 +55,21 @@ var managementPlatformHTML = `<!DOCTYPE html>
   --shadow:0 4px 24px rgba(0,0,0,0.4);
   --shadow-glow:0 0 30px var(--accent-glow);
   --transition:all .2s cubic-bezier(.4,0,.2,1);
+}
+/* World Map SVG Custom styling */
+#world-map-svg {
+  background: #020617;
+}
+#world-map-svg path {
+  fill: #0c152a;
+  stroke: #1e293b;
+  stroke-width: 0.6px;
+  transition: fill 0.3s ease, stroke 0.3s ease;
+}
+#world-map-svg path.attack-highlight {
+  fill: rgba(239, 68, 68, 0.75) !important;
+  stroke: #ef4444 !important;
+  stroke-width: 1.5px !important;
 }
 html{scroll-behavior:smooth;font-size:16px}
 body{
@@ -927,6 +945,36 @@ a:hover{color:var(--accent)}
           </div>
         </div>
 
+        <!-- ====== BẢN ĐỒ TẤN CÔNG TRỰC TIẾP (LIVE WORLD ATTACK MAP) ====== -->
+        <div class="card animate-in delay-1 mb-4" style="margin-bottom:20px;position:relative;overflow:hidden">
+          <div class="card-header">
+            <div class="flex items-center gap-8">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--red)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z"/></svg>
+              <span class="card-title font-bold" style="font-size:15px">Bản đồ tấn công trực tiếp</span>
+            </div>
+            <div class="flex gap-8">
+              <span class="badge badge-red" style="background:rgba(239,68,68,0.15);color:var(--red);border:1px solid rgba(239,68,68,0.3)"><span class="pulse" style="background:var(--red);width:6px;height:6px"></span> Live Attack Stream</span>
+            </div>
+          </div>
+          
+          <div id="map-viewport" style="position:relative;width:100%;height:380px;background:#020617;border-radius:12px;overflow:hidden;border:1px solid var(--border);cursor:grab;user-select:none">
+            <!-- Stats Overlay Banner (matching user screenshot) -->
+            <div style="position:absolute;top:16px;left:20px;z-index:10;background:rgba(15,23,42,0.92);border:1px solid var(--border);border-radius:10px;padding:12px 18px;backdrop-filter:blur(10px);box-shadow:0 8px 24px rgba(0,0,0,0.4)">
+              <div style="font-size:14px;font-weight:800;color:var(--text-primary)"><span id="map-banned-count" style="color:var(--red);font-size:17px;font-family:var(--font-mono)">3.000</span> IP đang bị chặn</div>
+              <div style="font-size:11px;color:var(--text-muted);margin-top:3px" id="map-sub-detail">40 quốc gia - Lớp 7: 1.861 - Flood kết nối: 776 - Lớp 4: 8</div>
+            </div>
+
+            <!-- Inner Wrapper containing SVG and Canvas (Lock aspect ratio to prevent warping) -->
+            <div id="map-inner-wrapper" style="position:absolute;top:0;left:0;width:2000px;height:857px;transform-origin:0 0;z-index:1">
+              <!-- Inlined World Map SVG Container -->
+              <div id="world-map-container" style="position:absolute;top:0;left:0;width:100%;height:100%;z-index:1;pointer-events:none"></div>
+
+              <!-- Canvas for Interactive Map Drawing (2000x857 buffer) -->
+              <canvas id="attack-map-canvas" width="2000" height="857" style="position:absolute;top:0;left:0;width:100%;height:100%;z-index:2;display:block;background:transparent"></canvas>
+            </div>
+          </div>
+        </div>
+
         <div class="grid grid-2 gap-16 animate-in delay-1">
           <div class="card">
             <div class="card-header">
@@ -959,6 +1007,30 @@ a:hover{color:var(--accent)}
                 <div class="text-center"><div class="font-mono font-bold" id="sys-load">0</div><div class="text-xs text-muted">Load Avg</div></div>
               </div>
             </div>
+          </div>
+        </div>
+
+        <!-- ====== TOP ATTACKING COUNTRIES BREAKDOWN ====== -->
+        <div class="grid grid-2 gap-16 animate-in delay-2 mt-4" style="margin-top:16px">
+          <div class="card">
+            <div class="card-header">
+              <div class="flex items-center gap-8">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--cyan)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v-6M6 20V10M18 20V4"/></svg>
+                <span class="card-title font-bold">Top Quốc Gia Tấn Công (Real-time)</span>
+              </div>
+              <span class="badge badge-cyan" id="top-country-count-badge">Active Geo Threats</span>
+            </div>
+            <div id="country-ranking-list" style="display:flex;flex-direction:column;gap:10px;padding:8px 0;max-height:260px;overflow-y:auto">
+              <!-- Dynamically populated real-time country ranking bars -->
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Phân Phối Tấn Công Theo Quốc Gia</span>
+              <span class="badge badge-purple">Threat Distribution</span>
+            </div>
+            <div class="chart-container" style="height:260px"><canvas id="country-attack-chart" class="chart-canvas"></canvas></div>
           </div>
         </div>
 
@@ -1302,6 +1374,13 @@ a:hover{color:var(--accent)}
               </tbody>
             </table>
           </div>
+          <div class="flex justify-between items-center mt-16 pt-16" style="border-top:1px solid var(--border)">
+            <div class="text-sm text-muted" id="bans-page-info">Showing 0-0 of 0 entries</div>
+            <div class="flex gap-8">
+              <button class="btn btn-secondary btn-sm" id="btn-bans-prev" onclick="prevBansPage()" disabled>Previous</button>
+              <button class="btn btn-secondary btn-sm" id="btn-bans-next" onclick="nextBansPage()" disabled>Next</button>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1453,7 +1532,7 @@ a:hover{color:var(--accent)}
     <div style="padding:24px;line-height:1.7;color:var(--text);font-size:.92rem">
       <div style="padding:16px;background:var(--bg-elevated);border-radius:var(--radius-sm);border:1px solid var(--border);margin-bottom:20px">
         <h4 style="color:var(--cyan);font-weight:700;margin-bottom:8px">📌 BƯỚC 1: CẤU HÌNH DNS TRÊN CLOUDFLARE (KHUYÊN DÙNG CNAME)</h4>
-        <div>🔹 <b>Cách 1 (Khuyên dùng - Ẩn IP gốc chống DDoS L4)</b>: Vào Cloudflare DNS, tạo bản ghi <b>CNAME</b> trỏ Tên miền của bạn về: <code style="color:var(--cyan);font-weight:bold">fw.hidev.dev</code></div>
+        <div>🔹 <b>Cách 1 (Khuyên dùng - Ẩn IP gốc chống DDoS L4)</b>: Vào Cloudflare DNS, tạo bản ghi <b>CNAME</b> trỏ Tên miền của bạn về: <code class="cluster-cname-label" style="color:var(--cyan);font-weight:bold">cname.local</code></div>
       </div>
 
       <div style="padding:16px;background:var(--bg-elevated);border-radius:var(--radius-sm);border:1px solid var(--border);margin-bottom:20px">
@@ -1810,6 +1889,26 @@ async function refreshData() {
     setText('hero-blocked', formatNum(stats.blocked_requests));
     setText('hero-domains', stats.mesh_members ? stats.mesh_members.length || 0 : 0);
 
+    const bans = stats.active_bans || 0;
+    setText('map-banned-count', formatNum(bans));
+
+    fetchJSON('/api/logs/query?type=&search=').then(function(logsData) {
+      window._geoCountryStats = {};
+      if (logsData && Array.isArray(logsData.logs)) {
+        logsData.logs.forEach(function(l) {
+          var code = (l.country_code || '').toUpperCase();
+          if (!code || code === 'XX' || code === 'UNKNOWN') return;
+          if (!window._geoCountryStats[code]) {
+            window._geoCountryStats[code] = {count: 0, l7: 0, l4: 0};
+          }
+          window._geoCountryStats[code].count++;
+          if (l.type === 'EXPLOIT' || l.type === 'SECURITY') window._geoCountryStats[code].l7++;
+          else window._geoCountryStats[code].l4++;
+        });
+      }
+      refreshCountryStatsUI();
+    });
+
     fetchJSON('/api/nodes').then(function(data) {
       if (data && data.nodes) {
         const topbarBadge = document.getElementById('topbar-node-badge');
@@ -2032,7 +2131,7 @@ function renderDomainsList() {
     container.innerHTML = '<div style="text-align:center;padding:32px;color:var(--text-muted)">No domains added yet. Click <b>+ Add Domain</b> to protect a website.</div>';
     return;
   }
-  const cnameTarget = window.clusterCNAME || 'fw.hidev.dev';
+  const cnameTarget = window.clusterCNAME || 'cname.local';
   let html = '<div style="padding:16px;background:var(--bg-elevated);border-radius:var(--radius-sm);margin-bottom:16px;font-size:.85rem;border:1px solid var(--border)">' +
     '<div style="font-weight:700;color:var(--cyan);margin-bottom:6px">📌 HƯỚNG DẪN CẤU HÌNH DNS &amp; CHỐNG DDOS LAYER 4 (ẨN IP GỐC):</div>' +
     '<div>🔹 <b>(Khuyên dùng - Ẩn IP chống DDoS L4)</b>: Trỏ bản ghi <b>CNAME</b> về <code style="color:var(--cyan)">' + escapeHtml(cnameTarget) + '</code></div>' +
@@ -2084,7 +2183,7 @@ async function checkDNS(domain) {
     if (res.cname_target) {
       window.clusterCNAME = res.cname_target;
     }
-    const cnameTarget = res.cname_target || window.clusterCNAME || 'fw.hidev.dev';
+    const cnameTarget = res.cname_target || window.clusterCNAME || 'cname.local';
     if (res.pointing || res.status === 'active') {
       toast('✅ DNS ' + domain + ' hợp lệ! Đã trỏ về WAF Cluster (CNAME ' + cnameTarget + ')', 'success');
     } else {
@@ -2096,6 +2195,12 @@ async function checkDNS(domain) {
 async function loadDomainsFromConfig() {
   const data = await fetchJSON('/api/config');
   if (data) {
+    if (data.cname_target) {
+      window.clusterCNAME = data.cname_target;
+      document.querySelectorAll('.cluster-cname-label').forEach(function(el) {
+        el.textContent = data.cname_target;
+      });
+    }
     // Get domains from config
     const stats = await fetchJSON('/api/stats');
     if (stats) {
@@ -2747,21 +2852,77 @@ async function saveSecurityRules() {
   }
 }
 
-async function loadFirewallBans() {
-  const stats = await fetchJSON('/api/stats');
+let bansCurrentPage = 1;
+const bansPageSize = 10;
+let bansCacheData = [];
+
+async function loadFirewallBans(targetPage) {
+  if (targetPage) bansCurrentPage = targetPage;
+  
+  if (!targetPage) {
+    const data = await fetchJSON('/api/firewall/bans');
+    bansCacheData = (data && data.bans) ? data.bans : [];
+    bansCurrentPage = 1;
+  }
+  
   const tbody = document.getElementById('tbody-banned-ips');
   if (!tbody) return;
-  if (!stats || !stats.banned_ips || stats.banned_ips === 0) {
+
+  const totalBans = bansCacheData.length;
+
+  if (totalBans === 0) {
     tbody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No blacklisted IPs active</td></tr>';
+    updateBansPagination(0, 0, 0);
     return;
   }
-  tbody.innerHTML =
-    '<tr>' +
-      '<td><span class="font-mono text-red">Active Mesh Blocklist</span></td>' +
-      '<td>Rate Limit / Malicious Payload Attack</td>' +
-      '<td>Realtime Active</td>' +
-      '<td><button class="btn btn-danger btn-sm" onclick="executeUnbanAll()">Unban All</button></td>' +
+
+  const totalPages = Math.ceil(totalBans / bansPageSize);
+  if (bansCurrentPage > totalPages) bansCurrentPage = totalPages;
+  if (bansCurrentPage < 1) bansCurrentPage = 1;
+
+  const startIdx = (bansCurrentPage - 1) * bansPageSize;
+  const endIdx = Math.min(startIdx + bansPageSize, totalBans);
+  const pageBans = bansCacheData.slice(startIdx, endIdx);
+
+  tbody.innerHTML = pageBans.map(function(b) {
+    var ttlMin = Math.ceil(b.ttl_sec / 60);
+    return '<tr>' +
+      '<td><span class="font-mono text-red">' + escapeHtml(b.ip) + '</span></td>' +
+      '<td>WAF / Rate Limit / DDoS Attack</td>' +
+      '<td><span class="badge badge-red">Banned</span></td>' +
+      '<td style="font-size:11px;color:var(--text-muted)">' + escapeHtml(b.expires_at) + ' (TTL: ' + ttlMin + 'm)</td>' +
     '</tr>';
+  }).join('') +
+  '<tr style="border-top:1px solid var(--border);">' +
+    '<td colspan="3" style="color:var(--text-muted);font-size:11px">' + totalBans + ' IPs active in ban list</td>' +
+    '<td><button class="btn btn-danger btn-sm" onclick="executeUnbanAll()">Unban All</button></td>' +
+  '</tr>';
+
+  updateBansPagination(startIdx + 1, endIdx, totalBans);
+}
+
+function updateBansPagination(start, end, total) {
+  const pageInfo = document.getElementById('bans-page-info');
+  const btnPrev = document.getElementById('btn-bans-prev');
+  const btnNext = document.getElementById('btn-bans-next');
+  if (pageInfo) pageInfo.textContent = 'Showing ' + start + '-' + end + ' of ' + total + ' entries (Page ' + bansCurrentPage + ')';
+  if (btnPrev) btnPrev.disabled = (bansCurrentPage <= 1);
+  if (btnNext) btnNext.disabled = (end >= total);
+}
+
+function prevBansPage() {
+  if (bansCurrentPage > 1) {
+    bansCurrentPage--;
+    loadFirewallBans(bansCurrentPage);
+  }
+}
+
+function nextBansPage() {
+  const totalPages = Math.ceil(bansCacheData.length / bansPageSize);
+  if (bansCurrentPage < totalPages) {
+    bansCurrentPage++;
+    loadFirewallBans(bansCurrentPage);
+  }
 }
 
 let logsCurrentPage = 1;
@@ -2881,6 +3042,570 @@ function animateCounter(id, target) {
 
 // Restore login session on page load if saved
 restoreSession();
+
+// Real-time geo country stats accumulated from SSE attack stream
+
+// Real-time geo country stats accumulated from SSE attack stream
+window._geoCountryStats = {};
+
+function renderCountryRankings(countryCounts) {
+  var listEl = document.getElementById('country-ranking-list');
+  if (!listEl) return;
+
+  var sorted = Object.values(countryCounts).filter(function(c){ return c.count > 0; }).sort(function(a, b) { return b.count - a.count; });
+  if (sorted.length === 0) {
+    listEl.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted);font-size:13px">No attack data yet — waiting for real-time events...</div>';
+    setText('top-country-count-badge', '0 quốc gia');
+    return;
+  }
+
+  var total = sorted.reduce(function(acc, item) { return acc + item.count; }, 0) || 1;
+  setText('top-country-count-badge', sorted.length + ' Quốc gia ghi nhận');
+
+  listEl.innerHTML = '';
+  sorted.slice(0, 15).forEach(function(c, i) {
+    var pct = Math.round((c.count / total) * 100);
+    var barColor = i === 0 ? '#ef4444' : i === 1 ? '#f59e0b' : i < 5 ? '#06b6d4' : '#64748b';
+    var row = document.createElement('div');
+    row.style.cssText = 'display:flex;flex-direction:column;gap:4px;padding:4px 0';
+    row.innerHTML =
+      '<div style="display:flex;justify-content:space-between;font-size:12px;align-items:center">' +
+        '<span style="display:flex;align-items:center;gap:6px">' +
+          '<span style="font-size:16px">' + c.flag + '</span>' +
+          '<strong style="color:var(--text-primary)">' + c.name + '</strong>' +
+          '<span style="color:var(--text-muted);font-size:10px">(' + c.code + ')</span>' +
+        '</span>' +
+        '<span style="font-family:var(--font-mono);font-weight:600;color:' + barColor + '">' + formatNum(c.count) + ' req <span style="color:var(--text-muted);font-weight:400">(' + pct + '%)</span></span>' +
+      '</div>' +
+      '<div style="height:6px;background:var(--bg-elevated);border-radius:3px;overflow:hidden">' +
+        '<div style="height:100%;background:' + barColor + ';border-radius:3px;width:' + Math.max(pct, 2) + '%;transition:width 0.5s ease"></div>' +
+      '</div>';
+    listEl.appendChild(row);
+  });
+}
+
+function updateCountryAttackChart(countryCounts) {
+  var canvas = document.getElementById('country-attack-chart');
+  if (!canvas) return;
+  var sorted = Object.values(countryCounts).filter(function(c){ return c.count > 0; }).sort(function(a,b){ return b.count-a.count; }).slice(0,10);
+  if (sorted.length === 0) return;
+  var ctx = canvas.getContext('2d');
+  var rect = canvas.parentElement.getBoundingClientRect();
+  canvas.width = rect.width * 2; canvas.height = rect.height * 2;
+  ctx.scale(2,2);
+  var w = rect.width, h = rect.height;
+  var colors = ['#ef4444','#f59e0b','#06b6d4','#22c55e','#a855f7','#ec4899','#14b8a6','#f97316','#6366f1','#84cc16'];
+  var maxVal = sorted[0].count || 1;
+  var barW = (w - 60) / sorted.length;
+  var chartH = h - 60;
+  var topPad = 20;
+  ctx.clearRect(0,0,w,h);
+  sorted.forEach(function(c, i) {
+    var x = 30 + i * barW + barW * 0.1;
+    var bw = barW * 0.8;
+    var bh = Math.max(4, (c.count / maxVal) * chartH);
+    var y = topPad + chartH - bh;
+    var grad = ctx.createLinearGradient(0, y, 0, y + bh);
+    grad.addColorStop(0, colors[i % colors.length]);
+    grad.addColorStop(1, colors[i % colors.length] + '44');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(x, y, bw, bh, 3) : ctx.rect(x, y, bw, bh);
+    ctx.fill();
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = 'bold 9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(c.flag, x + bw/2, y - 4);
+    ctx.fillStyle = '#64748b';
+    ctx.font = '8px sans-serif';
+    ctx.fillText(c.code, x + bw/2, topPad + chartH + 14);
+  });
+}
+
+// ========================================================================
+// ENTERPRISE LIVE WORLD ATTACK MAP ENGINE (Dynamic Geo-Projection & SSE Stream)
+// ========================================================================
+var attackMapCanvas = null;
+var attackMapCtx = null;
+var attackArcs = [];
+
+// Dynamic target nodes fetched directly from /api/nodes (aligned to Miller projection)
+var targetNodes = [];
+var pendingEvents = [];
+
+// Interactive Map Transformation Variables
+var mapZoom = 1.0;
+var mapPanX = 0;
+var mapPanY = 0;
+var isPanning = false;
+var panStartX = 0;
+var panStartY = 0;
+
+function applyMapTransforms() {
+  var wrapperEl = document.getElementById('map-inner-wrapper');
+  if (wrapperEl) {
+    wrapperEl.style.transform = 'translate(' + mapPanX + 'px, ' + mapPanY + 'px) scale(' + mapZoom + ')';
+    wrapperEl.style.transformOrigin = '0 0';
+  }
+}
+
+function initMapInteractivity() {
+  var viewport = document.getElementById('map-viewport');
+  if (!viewport) return;
+
+  viewport.addEventListener('mousedown', function(e) {
+    if (e.button !== 0) return;
+    isPanning = true;
+    viewport.style.cursor = 'grabbing';
+    panStartX = e.clientX - mapPanX;
+    panStartY = e.clientY - mapPanY;
+  });
+
+  window.addEventListener('mousemove', function(e) {
+    if (!isPanning) return;
+    mapPanX = e.clientX - panStartX;
+    mapPanY = e.clientY - panStartY;
+    applyMapTransforms();
+  });
+
+  window.addEventListener('mouseup', function() {
+    if (isPanning) {
+      isPanning = false;
+      viewport.style.cursor = 'grab';
+    }
+  });
+
+  // Touch Support for Mobile / Tablets
+  viewport.addEventListener('touchstart', function(e) {
+    if (e.touches.length !== 1) return;
+    isPanning = true;
+    panStartX = e.touches[0].clientX - mapPanX;
+    panStartY = e.touches[0].clientY - mapPanY;
+  });
+
+  viewport.addEventListener('touchmove', function(e) {
+    if (!isPanning || e.touches.length !== 1) return;
+    mapPanX = e.touches[0].clientX - panStartX;
+    mapPanY = e.touches[0].clientY - panStartY;
+    applyMapTransforms();
+  });
+
+  viewport.addEventListener('touchend', function() {
+    isPanning = false;
+  });
+
+  // Mouse wheel zoom centering on canvas coordinates
+  viewport.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var zoomFactor = 1.1;
+    if (e.deltaY > 0) {
+      mapZoom = Math.max(0.3, mapZoom / zoomFactor);
+    } else {
+      mapZoom = Math.min(8.0, mapZoom * zoomFactor);
+    }
+    applyMapTransforms();
+  }, { passive: false });
+}
+
+function projectCoordinates(lat, lon) {
+  // X: simple linear mapping for longitude [-180, 180] -> [0, 1]
+  var x = (lon + 180) / 360;
+  
+  // Y: Fitted equirectangular formula for this specific SVG map (Equator at y = 0.54956)
+  var y = 0.54956 - 0.005781 * lat;
+  
+  return { 
+    x: Math.max(0.01, Math.min(0.99, x)), 
+    y: Math.max(0.01, Math.min(0.99, y)) 
+  };
+}
+
+var COUNTRY_CENTROIDS = {
+  "AF": [33.9, 67.7], "AL": [41.1, 20.1], "DZ": [28.0, 1.6], "AR": [-38.4, -63.6],
+  "AM": [40.0, 45.0], "AU": [-25.2, 133.7], "AT": [47.5, 14.5], "AZ": [40.1, 47.5],
+  "BD": [23.6, 90.3], "BY": [53.7, 27.9], "BE": [50.5, 4.4], "BR": [-14.2, -51.9],
+  "BG": [42.7, 25.4], "CA": [56.1, -106.3], "CL": [-35.6, -71.5], "CN": [35.8, 104.1],
+  "CO": [4.5, -74.2], "HR": [45.1, 15.2], "CZ": [49.8, 15.4], "DK": [56.2, 9.5],
+  "EG": [26.8, 30.8], "FI": [61.9, 25.7], "FR": [46.2, 2.2], "DE": [51.1, 10.4],
+  "GR": [39.0, 22.0], "HU": [47.1, 19.5], "IN": [20.5, 78.9], "ID": [-0.7, 113.9],
+  "IR": [32.4, 53.6], "IQ": [33.2, 43.6], "IE": [53.4, -8.2], "IL": [31.0, 34.8],
+  "IT": [41.8, 12.5], "JP": [36.2, 138.2], "KZ": [48.0, 66.9], "KE": [-1.2, 36.8],
+  "KR": [35.9, 127.7], "MY": [4.2, 101.9], "MX": [23.6, -102.5], "NL": [52.1, 5.2],
+  "NZ": [-40.9, 174.8], "NG": [9.0, 8.6], "NO": [60.4, 8.4], "PK": [30.3, 69.3],
+  "PH": [12.8, 121.7], "PL": [51.9, 19.1], "PT": [39.3, -8.2], "RO": [45.9, 24.9],
+  "RU": [61.5, 105.3], "SA": [23.8, 45.0], "SG": [1.35, 103.8], "ZA": [-30.5, 22.9],
+  "ES": [40.4, -3.7], "SE": [60.1, 18.6], "CH": [46.8, 8.2], "TW": [23.7, 120.9],
+  "TH": [15.8, 101.0], "TR": [38.9, 35.2], "UA": [48.3, 31.1], "AE": [23.4, 53.8],
+  "GB": [55.3, -3.4], "US": [37.0, -95.7], "VN": [16.0, 106.0]
+};
+
+function getCountryCenter(code) {
+  if (!code) return null;
+  code = code.toUpperCase();
+  if (COUNTRY_CENTROIDS[code]) {
+    var coords = COUNTRY_CENTROIDS[code];
+    return projectCoordinates(coords[0], coords[1]);
+  }
+  return null;
+}
+
+function highlightCountryOnMap(code) {
+  if (!code) return;
+  code = code.toUpperCase();
+  
+  // Full map of all SVG countries mapping ISO 2-letter codes to their SVG class names
+  var codeToClass = {
+    "AF": "Afghanistan", "AL": "Albania", "DZ": "Algeria", "AI": "Anguilla", 
+    "AM": "Armenia", "AW": "Aruba", "AT": "Austria", "BH": "Bahrain", 
+    "BD": "Bangladesh", "BB": "Barbados", "BY": "Belarus", "BE": "Belgium", 
+    "BZ": "Belize", "BJ": "Benin", "BM": "Bermuda", "BT": "Bhutan", 
+    "BO": "Bolivia", "BA": "Bosnia and Herzegovina", "BW": "Botswana", 
+    "BR": "Brazil", "VG": "British Virgin Islands", "BN": "Brunei Darussalam", 
+    "BG": "Bulgaria", "BF": "Burkina Faso", "BI": "Burundi", "KH": "Cambodia", 
+    "CM": "Cameroon", "CF": "Central African Republic", "TD": "Chad", 
+    "CO": "Colombia", "CR": "Costa Rica", "HR": "Croatia", "CU": "Cuba", 
+    "CW": "Curaçao", "CZ": "Czech Republic", "CI": "Côte d'Ivoire", 
+    "KP": "Dem. Rep. Korea", "CD": "Democratic Republic of the Congo", 
+    "DJ": "Djibouti", "DM": "Dominica", "DO": "Dominican Republic", 
+    "EC": "Ecuador", "EG": "Egypt", "SV": "El Salvador", "GQ": "Equatorial Guinea", 
+    "ER": "Eritrea", "EE": "Estonia", "ET": "Ethiopia", "FI": "Finland", 
+    "GF": "French Guiana", "GA": "Gabon", "GE": "Georgia", "DE": "Germany", 
+    "GH": "Ghana", "GL": "Greenland", "GD": "Grenada", "GU": "Guam", 
+    "GT": "Guatemala", "GN": "Guinea", "GW": "Guinea-Bissau", "GY": "Guyana", 
+    "HT": "Haiti", "HN": "Honduras", "HU": "Hungary", "IS": "Iceland", 
+    "IN": "India", "IR": "Iran", "IQ": "Iraq", "IE": "Ireland", 
+    "IL": "Israel", "JM": "Jamaica", "JO": "Jordan", "KZ": "Kazakhstan", 
+    "KE": "Kenya", "XK": "Kosovo", "KW": "Kuwait", "KG": "Kyrgyzstan", 
+    "LA": "Lao PDR", "LV": "Latvia", "LB": "Lebanon", "LS": "Lesotho", 
+    "LR": "Liberia", "LY": "Libya", "LT": "Lithuania", "LU": "Luxembourg", 
+    "MK": "Macedonia", "MG": "Madagascar", "MW": "Malawi", "MV": "Maldives", 
+    "ML": "Mali", "MH": "Marshall Islands", "MQ": "Martinique", 
+    "MR": "Mauritania", "YT": "Mayotte", "MX": "Mexico", "MD": "Moldova", 
+    "MN": "Mongolia", "ME": "Montenegro", "MS": "Montserrat", "MA": "Morocco", 
+    "MZ": "Mozambique", "MM": "Myanmar", "NA": "Namibia", "NR": "Nauru", 
+    "NP": "Nepal", "NL": "Netherlands", "BQBO": "Netherlands", "NI": "Nicaragua", 
+    "NE": "Niger", "NG": "Nigeria", "PK": "Pakistan", "PW": "Palau", 
+    "PS": "Palestine", "PA": "Panama", "PY": "Paraguay", "PE": "Peru", 
+    "PL": "Poland", "PT": "Portugal", "QA": "Qatar", "CG": "Republic of Congo", 
+    "KR": "Republic of Korea", "RE": "Reunion", "RO": "Romania", "RW": "Rwanda", 
+    "BQSA": "Saba (Netherlands)", "LC": "Saint Lucia", "VC": "Saint Vincent and the Grenadines", 
+    "BL": "Saint-Barthélemy", "MF": "Saint-Martin", "SA": "Saudi Arabia", 
+    "SN": "Senegal", "RS": "Serbia", "SL": "Sierra Leone", "SX": "Sint Maarten", 
+    "SK": "Slovakia", "SI": "Slovenia", "SO": "Somalia", "ZA": "South Africa", 
+    "SS": "South Sudan", "ES": "Spain", "LK": "Sri Lanka", "BQSE": "St. Eustatius (Netherlands)", 
+    "SD": "Sudan", "SR": "Suriname", "SZ": "Swaziland", "SE": "Sweden", 
+    "CH": "Switzerland", "SY": "Syria", "TW": "Taiwan", "TJ": "Tajikistan", 
+    "TZ": "Tanzania", "TH": "Thailand", "GM": "The Gambia", "TL": "Timor-Leste", 
+    "TG": "Togo", "TN": "Tunisia", "TM": "Turkmenistan", "TV": "Tuvalu", 
+    "UG": "Uganda", "UA": "Ukraine", "AE": "United Arab Emirates", "UY": "Uruguay", 
+    "UZ": "Uzbekistan", "VE": "Venezuela", "VN": "Vietnam", "EH": "Western Sahara", 
+    "YE": "Yemen", "ZM": "Zambia", "ZW": "Zimbabwe"
+  };
+
+  var className = codeToClass[code];
+  var paths = [];
+  if (className) {
+    var selector = 'path.' + className.replace(/ /g, '.');
+    paths = Array.from(document.querySelectorAll('#world-map-svg ' + selector));
+  }
+  
+  var pathById = document.getElementById(code);
+  if (pathById) {
+    paths.push(pathById);
+  }
+  
+  paths.forEach(function(path) {
+    path.classList.add('attack-highlight');
+    setTimeout(function() {
+      path.classList.remove('attack-highlight');
+    }, 1200);
+  });
+}
+
+function refreshCountryStatsUI() {
+  var COUNTRY_META = {
+    'US':{'name':'United States','flag':'🇺🇸'},'RU':{'name':'Russia','flag':'🇷🇺'},'CN':{'name':'China','flag':'🇨🇳'},
+    'DE':{'name':'Germany','flag':'🇩🇪'},'GB':{'name':'United Kingdom','flag':'🇬🇧'},'BR':{'name':'Brazil','flag':'🇧🇷'},
+    'MX':{'name':'Mexico','flag':'🇲🇽'},'PH':{'name':'Philippines','flag':'🇵🇭'},'ID':{'name':'Indonesia','flag':'🇮🇩'},
+    'VN':{'name':'Vietnam','flag':'🇻🇳'},'IN':{'name':'India','flag':'🇮🇳'},'KR':{'name':'South Korea','flag':'🇰🇷'},
+    'JP':{'name':'Japan','flag':'🇯🇵'},'NL':{'name':'Netherlands','flag':'🇳🇱'},'FR':{'name':'France','flag':'🇫🇷'},
+    'IT':{'name':'Italy','flag':'🇮🇹'},'CA':{'name':'Canada','flag':'🇨🇦'},'AU':{'name':'Australia','flag':'🇦🇺'},
+    'SG':{'name':'Singapore','flag':'🇸🇬'},'TR':{'name':'Turkey','flag':'🇹🇷'},'UA':{'name':'Ukraine','flag':'🇺🇦'},
+    'PL':{'name':'Poland','flag':'🇵🇱'},'TH':{'name':'Thailand','flag':'🇹🇭'},'MY':{'name':'Malaysia','flag':'🇲🇾'},
+    'PK':{'name':'Pakistan','flag':'🇵🇰'},'NG':{'name':'Nigeria','flag':'🇳🇬'},'ZA':{'name':'South Africa','flag':'🇿🇦'},
+    'BD':{'name':'Bangladesh','flag':'🇧🇩'},'EG':{'name':'Egypt','flag':'🇪🇬'},'AR':{'name':'Argentina','flag':'🇦🇷'}
+  };
+
+  var countryCounts = {};
+  if (window._geoCountryStats && Object.keys(window._geoCountryStats).length > 0) {
+    Object.keys(window._geoCountryStats).forEach(function(code) {
+      var meta = COUNTRY_META[code] || {name: code, flag: '🌐'};
+      countryCounts[code] = {
+        name: meta.name, code: code, flag: meta.flag,
+        count: window._geoCountryStats[code].count || 0,
+        l7: window._geoCountryStats[code].l7 || 0,
+        l4: window._geoCountryStats[code].l4 || 0
+      };
+    });
+  }
+
+  var activeCountries = Object.keys(countryCounts).length;
+  var mapSubDetail = document.getElementById('map-sub-detail');
+  if (mapSubDetail) {
+    var l7Total = 0;
+    var l4Total = 0;
+    Object.keys(countryCounts).forEach(function(code) {
+      l7Total += countryCounts[code].l7;
+      l4Total += countryCounts[code].l4;
+    });
+    mapSubDetail.textContent = activeCountries + ' quốc gia - Lớp 7: ' + formatNum(l7Total) + ' - Flood kết nối: ' + formatNum(l4Total);
+  }
+
+  renderCountryRankings(countryCounts);
+  updateCountryAttackChart(countryCounts);
+}
+
+function initAttackMap() {
+  attackMapCanvas = document.getElementById('attack-map-canvas');
+  if (!attackMapCanvas) return;
+  attackMapCtx = attackMapCanvas.getContext('2d');
+
+  attackArcs = [];
+  initMapInteractivity();
+
+  // Set initial map centering & zoom scale to fit the viewport container
+  var viewport = document.getElementById('map-viewport');
+  if (viewport) {
+    var scaleX = viewport.clientWidth / 2000;
+    var scaleY = viewport.clientHeight / 857;
+    mapZoom = Math.min(scaleX, scaleY);
+    mapPanX = (viewport.clientWidth - 2000 * mapZoom) / 2;
+    mapPanY = (viewport.clientHeight - 857 * mapZoom) / 2;
+    applyMapTransforms();
+  }
+
+  function processAttackEvent(evt) {
+    var srcPos = null;
+    if (evt.latitude && evt.longitude && evt.latitude !== 0 && evt.longitude !== 0) {
+      srcPos = projectCoordinates(evt.latitude, evt.longitude);
+    } else if (evt.countryCode) {
+      srcPos = getCountryCenter(evt.countryCode);
+    }
+    if (!srcPos) return;
+
+    var targetNode = targetNodes[Math.floor(Math.random() * targetNodes.length)];
+    attackArcs.push({
+      from: srcPos,
+      to: targetNode,
+      label: evt.ip + ' (' + (evt.countryCode || 'XX') + ')',
+      action: evt.action,
+      progress: 0,
+      pulseRadius: 2,
+      speed: 0.008 + Math.random() * 0.012,
+      curvature: (Math.random() - 0.5) * 0.6
+    });
+    if (attackArcs.length > 60) attackArcs.shift();
+  }
+
+  function loadWafNodes() {
+    fetchJSON('/api/nodes').then(function(data) {
+      if (data && data.nodes && Array.isArray(data.nodes) && data.nodes.length > 0) {
+        targetNodes = data.nodes.map(function(n, idx) {
+          var lat = n.latitude || 21.0285;
+          var lon = n.longitude || 105.8542;
+          var pos = projectCoordinates(lat, lon);
+          
+          return {
+            x: pos.x,
+            y: pos.y,
+            label: (n.name || 'Node ' + (idx + 1)) + ' (' + (n.ip || '') + ')',
+            lat: lat,
+            lon: lon
+          };
+        });
+
+        // Flush any pending events that arrived before WAF nodes were loaded
+        while (pendingEvents.length > 0) {
+          var evt = pendingEvents.shift();
+          processAttackEvent(evt);
+        }
+      }
+    });
+  }
+
+  // Fetch and inject world.svg inline so it is fully styled and interactive
+  fetch('/world.svg')
+    .then(function(r) { return r.text(); })
+    .then(function(svgText) {
+      var container = document.getElementById('world-map-container');
+      if (!container) return;
+      var parser = new DOMParser();
+      var doc = parser.parseFromString(svgText, 'image/svg+xml');
+      var svgEl = doc.querySelector('svg');
+      if (svgEl) {
+        svgEl.setAttribute('id', 'world-map-svg');
+        svgEl.setAttribute('width', '100%');
+        svgEl.setAttribute('height', '100%');
+        svgEl.setAttribute('preserveAspectRatio', 'none');
+        svgEl.style.position = 'absolute';
+        svgEl.style.top = '0';
+        svgEl.style.left = '0';
+        svgEl.style.width = '100%';
+        svgEl.style.height = '100%';
+        svgEl.style.pointerEvents = 'none';
+        
+        svgEl.querySelectorAll('path').forEach(function(p) {
+          p.removeAttribute('fill');
+          p.removeAttribute('stroke');
+          p.removeAttribute('stroke-width');
+        });
+        
+        container.innerHTML = '';
+        container.appendChild(svgEl);
+        applyMapTransforms();
+
+        // Dynamically load WAF nodes centered inside Vietnam's SVG paths
+        loadWafNodes();
+      }
+    }).catch(function(err) {});
+
+  // Connect SSE Live Telemetry Stream - accumulate geo country stats from REAL geoIP events
+  if (window.EventSource) {
+    var evtSource = new EventSource('/api/attack-stream');
+    evtSource.onmessage = function(e) {
+      try {
+        var events = JSON.parse(e.data);
+        if (!events || !Array.isArray(events)) return;
+        var needsUIUpdate = false;
+        events.forEach(function(evt) {
+          if (evt.countryCode && evt.countryCode !== 'XX' && evt.countryCode !== '') {
+            var code = evt.countryCode;
+            if (!window._geoCountryStats[code]) {
+              window._geoCountryStats[code] = {count: 0, l7: 0, l4: 0};
+            }
+            window._geoCountryStats[code].count++;
+            if (evt.action === 'BLOCKED' || evt.action === 'EXPLOIT') window._geoCountryStats[code].l7++;
+            else window._geoCountryStats[code].l4++;
+            
+            needsUIUpdate = true;
+            // Trigger geographic flash highlight
+            highlightCountryOnMap(code);
+          }
+
+          if (targetNodes.length === 0) {
+            pendingEvents.push(evt);
+            if (pendingEvents.length > 100) pendingEvents.shift();
+            return;
+          }
+
+          processAttackEvent(evt);
+        });
+        if (needsUIUpdate) {
+          refreshCountryStatsUI();
+        }
+      } catch (err) {}
+    };
+  }
+
+  function renderMapFrame() {
+    if (!attackMapCtx || !attackMapCanvas) return;
+    var w = 2000;
+    var h = 857;
+    attackMapCtx.clearRect(0, 0, w, h);
+
+    // Draw Dynamic Server Nodes
+    targetNodes.forEach(function(node, idx) {
+      var nx = node.x * w;
+      var ny = node.y * h;
+
+      attackMapCtx.beginPath();
+      attackMapCtx.arc(nx, ny, 12, 0, Math.PI * 2);
+      attackMapCtx.fillStyle = 'rgba(6, 182, 212, 0.25)';
+      attackMapCtx.fill();
+
+      attackMapCtx.beginPath();
+      attackMapCtx.arc(nx, ny, 6, 0, Math.PI * 2);
+      attackMapCtx.fillStyle = 'var(--cyan)';
+      attackMapCtx.fill();
+
+      attackMapCtx.fillStyle = '#ffffff';
+      attackMapCtx.font = 'bold 11px sans-serif';
+      if (idx === 0) {
+        attackMapCtx.textAlign = 'right';
+        attackMapCtx.fillText(node.label, nx - 12, ny + 4);
+      } else {
+        attackMapCtx.textAlign = 'left';
+        attackMapCtx.fillText(node.label, nx + 12, ny + 4);
+      }
+    });
+
+    // Draw Attack Dots & Bezier Arcs
+    for (var i = attackArcs.length - 1; i >= 0; i--) {
+      var arc = attackArcs[i];
+      arc.progress += arc.speed;
+      if (arc.progress >= 1) {
+        attackArcs.splice(i, 1);
+        continue;
+      }
+
+      var sx = arc.from.x * w;
+      var sy = arc.from.y * h;
+      var tx = arc.to.x * w;
+      var ty = arc.to.y * h;
+
+      var color = (arc.action === 'BLOCKED' || arc.action === 'BAN' || arc.action === 'DROP') ? '#ef4444' : '#f59e0b';
+
+      // 1. Draw Pulsing Origin Dot at Attacker Location
+      arc.pulseRadius = (arc.pulseRadius || 2) + 0.3;
+      if (arc.pulseRadius > 14) arc.pulseRadius = 2;
+
+      attackMapCtx.beginPath();
+      attackMapCtx.arc(sx, sy, arc.pulseRadius, 0, Math.PI * 2);
+      attackMapCtx.strokeStyle = color;
+      attackMapCtx.globalAlpha = Math.max(0, 1 - (arc.pulseRadius / 14));
+      attackMapCtx.lineWidth = 1.5;
+      attackMapCtx.stroke();
+
+      attackMapCtx.beginPath();
+      attackMapCtx.arc(sx, sy, 4, 0, Math.PI * 2);
+      attackMapCtx.fillStyle = color;
+      attackMapCtx.globalAlpha = 1.0;
+      attackMapCtx.fill();
+
+      // 2. Draw Arc
+      var mx = (sx + tx) / 2 + (arc.curvature * (ty - sy));
+      var my = (sy + ty) / 2 - (arc.curvature * (tx - sx));
+
+      attackMapCtx.beginPath();
+      attackMapCtx.moveTo(sx, sy);
+      attackMapCtx.quadraticCurveTo(mx, my, tx, ty);
+      attackMapCtx.strokeStyle = color;
+      attackMapCtx.globalAlpha = 0.35;
+      attackMapCtx.lineWidth = 1.5;
+      attackMapCtx.stroke();
+      attackMapCtx.globalAlpha = 1.0;
+
+      // 3. Draw Pulse Traveling Particle
+      var t = arc.progress;
+      var px = (1 - t) * (1 - t) * sx + 2 * (1 - t) * t * mx + t * t * tx;
+      var py = (1 - t) * (1 - t) * sy + 2 * (1 - t) * t * my + t * t * ty;
+
+      attackMapCtx.beginPath();
+      attackMapCtx.arc(px, py, 4, 0, Math.PI * 2);
+      attackMapCtx.fillStyle = color;
+      attackMapCtx.shadowColor = color;
+      attackMapCtx.shadowBlur = 8;
+      attackMapCtx.fill();
+      attackMapCtx.shadowBlur = 0;
+    }
+
+    requestAnimationFrame(renderMapFrame);
+  }
+  requestAnimationFrame(renderMapFrame);
+}
+
+
+setTimeout(initAttackMap, 500);
 
 // ========================================================================
 // KEYBOARD SHORTCUTS

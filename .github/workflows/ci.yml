@@ -7,47 +7,72 @@ on:
     branches: [ main, master ]
 
 jobs:
-  build-and-test:
-    name: Build & Test Suite
+  lint:
+    name: Lint & Format
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Set up Go 1.24
+      - uses: actions/checkout@v4
+      - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.24'
           cache: true
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v4
+        with:
+          version: latest
+          args: --timeout=5m
 
+  test:
+    name: Tests & Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
       - name: Install System Dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev linux-tools-common
+      - name: Run Unit Tests with Race Detector
+        run: go test -v -race -coverprofile=coverage.txt -covermode=atomic ./...
+      - name: Run Benchmarks
+        run: go test -bench=. -benchmem -run=^$ ./...
+
+  build:
+    name: Build Binary & Docker Image
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+      - name: Build WAF Server Binary
+        run: go build -ldflags="-s -w" -o bin/mango-waf .
+      - name: Build CLI Binary
+        run: go build -ldflags="-s -w" -o bin/mango-cli ./cmd/cli
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+      - name: Build and Push Local Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true
+          tags: mango-shield:latest
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+      - name: Move cache
         run: |
-          sudo apt-get update
-          sudo apt-get install -y clang llvm libbpf-dev linux-tools-common
-
-      - name: Verify Code Formatting
-        run: |
-          if [ -n "$(gofmt -l .)" ]; then
-            echo "The following files are not formatted properly:"
-            gofmt -l .
-            exit 1
-          fi
-
-      - name: Run Go Vet
-        run: go vet ./...
-
-      - name: Run Unit & Integration Tests
-        run: go test -v -cover ./...
-
-      - name: Run Data Race Detector
-        run: go test -race ./...
-
-      - name: Run Performance Benchmarks
-        run: go test -bench=. -benchmem ./...
-
-      - name: Verify Binary Build
-        run: go build -o bin/mango-shield ./cmd/cli
-
-      - name: Verify Docker Container Build
-        run: docker build -t mango-shield:latest .
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache

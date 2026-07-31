@@ -99,11 +99,11 @@ type ProtectionConfig struct {
 }
 
 type RateLimitConfig struct {
-	Enabled           bool `yaml:"enabled"`
-	RequestsPerSecond int  `yaml:"requests_per_second"`
-	Burst             int  `yaml:"burst"`
-	PerIP             bool `yaml:"per_ip"`
-	Adaptive          bool `yaml:"adaptive"`
+	Enabled           bool `yaml:"enabled" json:"enabled"`
+	RequestsPerSecond int  `yaml:"requests_per_second" json:"requests_per_second"`
+	Burst             int  `yaml:"burst" json:"burst"`
+	PerIP             bool `yaml:"per_ip" json:"per_ip"`
+	Adaptive          bool `yaml:"adaptive" json:"adaptive"`
 }
 
 type ConnLimitConfig struct {

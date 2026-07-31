@@ -103,10 +103,24 @@ func (tb *TokenBucket) LastSeen() time.Time {
 	return tb.lastTime
 }
 
-// IPRateLimiter manages per-IP rate limiters
-type IPRateLimiter struct {
+func fnv1a(s string) uint32 {
+	var hash uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		hash ^= uint32(s[i])
+		hash *= 16777619
+	}
+	return hash
+}
+
+type limiterShard struct {
 	mu       sync.RWMutex
 	limiters map[string]*TokenBucket
+}
+
+// IPRateLimiter manages per-IP rate limiters using sharding
+type IPRateLimiter struct {
+	shards   [256]*limiterShard
+	mu       sync.RWMutex
 	rate     float64
 	capacity float64
 }
@@ -114,9 +128,13 @@ type IPRateLimiter struct {
 // NewIPRateLimiter creates a new per-IP rate limiter
 func NewIPRateLimiter(rps float64, burst float64) *IPRateLimiter {
 	rl := &IPRateLimiter{
-		limiters: make(map[string]*TokenBucket),
 		rate:     rps,
 		capacity: burst,
+	}
+	for i := 0; i < 256; i++ {
+		rl.shards[i] = &limiterShard{
+			limiters: make(map[string]*TokenBucket),
+		}
 	}
 	go rl.cleanupLoop()
 	return rl
@@ -124,19 +142,26 @@ func NewIPRateLimiter(rps float64, burst float64) *IPRateLimiter {
 
 // Allow checks if an IP's request is allowed
 func (rl *IPRateLimiter) Allow(ip string) bool {
-	rl.mu.RLock()
-	limiter, ok := rl.limiters[ip]
-	rl.mu.RUnlock()
+	shardIdx := fnv1a(ip) % 256
+	shard := rl.shards[shardIdx]
+
+	shard.mu.RLock()
+	limiter, ok := shard.limiters[ip]
+	shard.mu.RUnlock()
 
 	if !ok {
-		rl.mu.Lock()
-		// Double-check
-		limiter, ok = rl.limiters[ip]
+		shard.mu.Lock()
+		limiter, ok = shard.limiters[ip]
 		if !ok {
-			limiter = NewTokenBucket(rl.rate, rl.capacity)
-			rl.limiters[ip] = limiter
+			rl.mu.RLock()
+			rate := rl.rate
+			capacity := rl.capacity
+			rl.mu.RUnlock()
+
+			limiter = NewTokenBucket(rate, capacity)
+			shard.limiters[ip] = limiter
 		}
-		rl.mu.Unlock()
+		shard.mu.Unlock()
 	}
 
 	return limiter.Allow()
@@ -145,19 +170,39 @@ func (rl *IPRateLimiter) Allow(ip string) bool {
 // SetGlobalRate updates rate for all new limiters
 func (rl *IPRateLimiter) SetGlobalRate(rps float64) {
 	rl.mu.Lock()
-	defer rl.mu.Unlock()
 	rl.rate = rps
+	rl.mu.Unlock()
+
+	for i := 0; i < 256; i++ {
+		shard := rl.shards[i]
+		shard.mu.Lock()
+		for _, lim := range shard.limiters {
+			lim.SetRate(rps)
+		}
+		shard.mu.Unlock()
+	}
 }
 
 // SetRate updates both rate and capacity dynamically
 func (rl *IPRateLimiter) SetRate(rps float64, burst float64) {
 	rl.mu.Lock()
-	defer rl.mu.Unlock()
 	if rps > 0 {
 		rl.rate = rps
 	}
 	if burst > 0 {
 		rl.capacity = burst
+	}
+	rl.mu.Unlock()
+
+	for i := 0; i < 256; i++ {
+		shard := rl.shards[i]
+		shard.mu.Lock()
+		for _, lim := range shard.limiters {
+			if rps > 0 {
+				lim.SetRate(rps)
+			}
+		}
+		shard.mu.Unlock()
 	}
 }
 
@@ -166,13 +211,16 @@ func (rl *IPRateLimiter) cleanupLoop() {
 	defer ticker.Stop()
 	for range ticker.C {
 		now := time.Now()
-		rl.mu.Lock()
-		for ip, tb := range rl.limiters {
-			if now.Sub(tb.LastSeen()) > 10*time.Minute {
-				delete(rl.limiters, ip)
+		for i := 0; i < 256; i++ {
+			shard := rl.shards[i]
+			shard.mu.Lock()
+			for ip, tb := range shard.limiters {
+				if now.Sub(tb.LastSeen()) > 10*time.Minute {
+					delete(shard.limiters, ip)
+				}
 			}
+			shard.mu.Unlock()
 		}
-		rl.mu.Unlock()
 	}
 }
 
@@ -209,11 +257,10 @@ func (mm *MemoryManager) monitorLoop() {
 		allocMB := int64(m.Alloc / 1024 / 1024)
 		sysMB := int64(m.Sys / 1024 / 1024)
 
-		// Force GC if above threshold
+		// Log warning if above threshold, but do NOT trigger manual runtime.GC() STW pauses.
+		// Native GOMEMLIMIT environment variable should be used for reliable memory limiting.
 		if mm.maxMemoryMB > 0 && allocMB > int64(float64(mm.maxMemoryMB)*mm.gcThreshold) {
-			runtime.GC()
-			atomic.AddInt64(&mm.forceGCCount, 1)
-			logger.Warn("Force GC triggered",
+			logger.Warn("Memory limit threshold reached. Configure GOMEMLIMIT for dynamic JVM-like heap tuning.",
 				"alloc_mb", allocMB,
 				"sys_mb", sysMB,
 				"max_mb", mm.maxMemoryMB,

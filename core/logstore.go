@@ -3,24 +3,49 @@ package core
 import (
 	"fmt"
 	"math/rand"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"mango-waf/intelligence"
 )
 
 // SecurityLogEvent represents a single security or WAF event
 type SecurityLogEvent struct {
-	Timestamp string `json:"timestamp"`
-	Type      string `json:"type"`      // SECURITY, EXPLOIT, ACCESS, CHALLENGE, BAN
-	ClientIP  string `json:"client_ip"`
-	Domain    string `json:"domain"`
-	Method    string `json:"method"`
-	Path      string `json:"path"`
-	Status    int    `json:"status"`
-	Action    string `json:"action"`    // BLOCKED, DROPPED, PASSED, CHALLENGE_SOLVED
-	Rule      string `json:"rule"`      // Rule ID or category (e.g., OWASP-942100, SQLi, XSS)
-	Desc      string `json:"desc"`      // Event details / payload snippet
+	ID          uint64 `json:"id"`
+	Timestamp   string `json:"timestamp"`
+	Type        string `json:"type"`      // SECURITY, EXPLOIT, ACCESS, CHALLENGE, BAN
+	ClientIP    string `json:"client_ip"`
+	Domain      string `json:"domain"`
+	Method      string `json:"method"`
+	Path        string `json:"path"`
+	Status      int    `json:"status"`
+	Action      string `json:"action"`    // BLOCKED, DROPPED, PASSED, CHALLENGE_SOLVED
+	Rule        string `json:"rule"`      // Rule ID or category (e.g., OWASP-942100, SQLi, XSS)
+	Desc        string `json:"desc"`      // Event details / payload snippet
+	CountryCode string `json:"country_code"`
+	CountryName string `json:"country_name"`
+}
+
+var logGeoProvider *intelligence.GeoProvider
+var logGeoOnce sync.Once
+
+func getLogGeoProvider() *intelligence.GeoProvider {
+	logGeoOnce.Do(func() {
+		dbPath := "GeoLite2-City.mmdb"
+		if _, err := os.Stat(dbPath); err != nil {
+			if _, err2 := os.Stat("../GeoLite2-City.mmdb"); err2 == nil {
+				dbPath = "../GeoLite2-City.mmdb"
+			}
+		}
+		p, err := intelligence.NewGeoProvider(dbPath)
+		if err == nil {
+			logGeoProvider = p
+		}
+	})
+	return logGeoProvider
 }
 
 // LogStore holds recent security events in a thread-safe ring buffer with async worker
@@ -36,6 +61,7 @@ type LogStore struct {
 var globalLogStore *LogStore
 var logStoreOnce sync.Once
 var vtZone = time.FixedZone("ICT", 7*3600)
+var logIDCounter uint64
 
 // GetLogStore returns the singleton LogStore
 func GetLogStore() *LogStore {
@@ -92,17 +118,34 @@ func (ls *LogStore) RecordEvent(eventType, clientIP, domain, method, path string
 		}
 	}
 
+	var countryCode, countryName string
+	if gp := getLogGeoProvider(); gp != nil {
+		if geo, err := gp.Lookup(clientIP); err == nil {
+			countryCode = geo.CountryCode
+			countryName = geo.Country
+		}
+	}
+	if countryCode == "" {
+		countryCode = "XX"
+	}
+	if countryName == "" {
+		countryName = "Unknown"
+	}
+
 	event := SecurityLogEvent{
-		Timestamp: time.Now().In(vtZone).Format("2006-01-02 15:04:05"),
-		Type:      eventType,
-		ClientIP:  clientIP,
-		Domain:    domain,
-		Method:    method,
-		Path:      path,
-		Status:    status,
-		Action:    action,
-		Rule:      rule,
-		Desc:      desc,
+		ID:          atomic.AddUint64(&logIDCounter, 1),
+		Timestamp:   time.Now().In(vtZone).Format("2006-01-02 15:04:05"),
+		Type:        eventType,
+		ClientIP:    clientIP,
+		Domain:      domain,
+		Method:      method,
+		Path:        path,
+		Status:      status,
+		Action:      action,
+		Rule:        rule,
+		Desc:        desc,
+		CountryCode: countryCode,
+		CountryName: countryName,
 	}
 
 	// Non-blocking channel push: if channel is full during 100k+ RPS Tsunami, drop log silently (0ms overhead)

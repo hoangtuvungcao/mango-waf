@@ -427,10 +427,68 @@ func bpfMapDeleteElem(fd int, key unsafe.Pointer) error {
 	return nil
 }
 
+func bpfMapGetNextKey(fd int, key, nextKey unsafe.Pointer) error {
+	type bpfAttrMapGetNextKey struct {
+		mapFd   uint32
+		pad0    uint32
+		key     uint64
+		nextKey uint64
+	}
+	attr := bpfAttrMapGetNextKey{
+		mapFd:   uint32(fd),
+		key:     uint64(uintptr(key)),
+		nextKey: uint64(uintptr(nextKey)),
+	}
+	_, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(4), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func bpfMapLookupElem(fd int, key, value unsafe.Pointer) error {
+	type bpfAttrMapLookupElem struct {
+		mapFd uint32
+		pad0  uint32
+		key   uint64
+		value uint64
+		flags uint64
+	}
+	attr := bpfAttrMapLookupElem{
+		mapFd: uint32(fd),
+		key:   uint64(uintptr(key)),
+		value: uint64(uintptr(value)),
+	}
+	_, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(1), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
 // GetStats returns the number of IPs currently in the hardware blacklist and total packets dropped
 func (x *XDPManager) GetStats() (int64, int64) {
 	if !x.Enabled {
 		return 0, 0
+	}
+
+	if x.mapFD > 0 {
+		var key, nextKey uint32
+		var value uint64
+		var count int64
+		var totalDrops int64
+
+		// Pass nil as key to get the first key
+		err := bpfMapGetNextKey(x.mapFD, nil, unsafe.Pointer(&nextKey))
+		for err == nil {
+			count++
+			if bpfMapLookupElem(x.mapFD, unsafe.Pointer(&nextKey), unsafe.Pointer(&value)) == nil {
+				totalDrops += int64(value)
+			}
+			key = nextKey
+			err = bpfMapGetNextKey(x.mapFD, unsafe.Pointer(&key), unsafe.Pointer(&nextKey))
+		}
+		return count, totalDrops
 	}
 
 	if x.BPFToolBinary != "" {

@@ -183,12 +183,15 @@ func (e *Engine) CheckRateLimit(ip string) bool {
 		return false // Not rate limited
 	}
 
-	v, _ := e.rateLimit.counters.LoadOrStore(ip, &RateLimitBucket{
-		Tokens:     float64(cfg.Burst),
-		MaxTokens:  float64(cfg.Burst),
-		RefillRate: float64(cfg.RequestsPerSecond),
-		LastRefill: time.Now(),
-	})
+	v, ok := e.rateLimit.counters.Load(ip)
+	if !ok {
+		v, _ = e.rateLimit.counters.LoadOrStore(ip, &RateLimitBucket{
+			Tokens:     float64(cfg.Burst),
+			MaxTokens:  float64(cfg.Burst),
+			RefillRate: float64(cfg.RequestsPerSecond),
+			LastRefill: time.Now(),
+		})
+	}
 
 	bucket := v.(*RateLimitBucket)
 	bucket.mu.Lock()

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -55,21 +56,27 @@ func main() {
 	}
 	fmt.Printf("  ✓ Cấu hình đã tải: %s\n", *configPath)
 
-	// Merge persistent dynamic domains from storage (data/mango_db.json)
+	// Merge persistent dynamic domains from storage without randomizing domain order
 	st := api.GetStorage()
 	if st != nil && len(st.Data.Domains) > 0 {
 		domainMap := make(map[string]config.DomainConfig)
-		for _, d := range cfg.Domains {
-			domainMap[strings.ToLower(d.Name)] = d
-		}
 		for _, d := range st.Data.Domains {
 			domainMap[strings.ToLower(d.Name)] = d
 		}
-		mergedDomains := make([]config.DomainConfig, 0, len(domainMap))
-		for _, d := range domainMap {
-			mergedDomains = append(mergedDomains, d)
+		for i, d := range cfg.Domains {
+			if stored, ok := domainMap[strings.ToLower(d.Name)]; ok {
+				cfg.Domains[i] = stored
+				delete(domainMap, strings.ToLower(d.Name))
+			}
 		}
-		cfg.Domains = mergedDomains
+		var newNames []string
+		for k := range domainMap {
+			newNames = append(newNames, k)
+		}
+		sort.Strings(newNames)
+		for _, k := range newNames {
+			cfg.Domains = append(cfg.Domains, domainMap[k])
+		}
 	}
 
 	// === 2. Initialize Logger ===
@@ -144,7 +151,7 @@ func main() {
 	shield := core.New(cfg)
 
 	// === Initialize Configuration Center (Single Source of Truth) ===
-	center := config.NewCenter(*configPath)
+	center := config.InitCenter(*configPath)
 	center.RegisterReloadHook(func(newCfg *config.Config) error {
 		shield.ReloadConfig(newCfg)
 		logger.Info("ConfigCenter: Hot-reloaded all WAF security engines successfully", "domains", len(newCfg.Domains))
@@ -225,8 +232,28 @@ func main() {
 			UpdateUpstreamFunc: func(domains []config.DomainConfig) {
 				shield.UpdateUpstreams(domains)
 			},
+			GetBannedIPsListFunc: func() []api.BannedIPEntry {
+				rawList := shield.GetPipeline().GetBannedIPsList()
+				entries := make([]api.BannedIPEntry, 0, len(rawList))
+				for _, raw := range rawList {
+					parts := strings.SplitN(raw, "|", 3)
+					if len(parts) == 3 {
+						ttl := int64(0)
+						fmt.Sscanf(parts[2], "%d", &ttl)
+						entries = append(entries, api.BannedIPEntry{
+							IP:        parts[0],
+							ExpiresAt: parts[1],
+							TTLSec:    ttl,
+						})
+					}
+				}
+				return entries
+			},
 		}
 		dashboard := api.NewDashboard(cfg, statsAdapter)
+		if shield.GetPipeline() != nil {
+			dashboard.SetAlertManager(shield.GetPipeline().GetAlerts())
+		}
 		go func() {
 			if err := dashboard.Start(); err != nil {
 				logger.Error("Dashboard failed", "error", err)

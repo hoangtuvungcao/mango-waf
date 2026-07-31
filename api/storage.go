@@ -80,11 +80,24 @@ func (s *Storage) load() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	adminUser := "admin"
+	adminPass := "admin123"
+	adminEmail := "admin@mango-shield.local"
+
+	cfg := config.Get()
+	if cfg != nil {
+		if cfg.Dashboard.Username != "" {
+			adminUser = cfg.Dashboard.Username
+		}
+		if cfg.Dashboard.Password != "" {
+			adminPass = cfg.Dashboard.Password
+		}
+		adminEmail = adminUser + "@mango-shield.local"
+	}
+
 	s.Data = StorageData{
 		Users: []UserAccount{
-			{Username: "admin", Password: "admin123", Email: "admin@hidev.dev", Role: "super_admin"},
-			{Username: "operator", Password: "operator123", Email: "operator@hidev.dev", Role: "operator"},
-			{Username: "user", Password: "user123", Email: "user@hidev.dev", Role: "user", Domains: []string{"ngocronghuyetlong.com"}},
+			{Username: adminUser, Password: adminPass, Email: adminEmail, Role: "super_admin"},
 		},
 		Pricing: []PricingPlan{
 			{ID: "enterprise_free", Name: "Enterprise Shield Plan", Price: "Free", Period: "/trọn đời", Subtitle: "Gói cao cấp nhất - 100% Free thử nghiệm hệ thống", Featured: true, Features: []string{"Không Giới Hạn Tên Miền", "Công Nghệ eBPF/XDP Kernel", "WAF Rules Engine - OWASP Top 10", "PoW Browser Challenge", "Multi-Node Cluster", "Tự Động Cấp Phát Chứng Chỉ SSL/TLS", "Hỗ Trợ Ẩn IP Gốc Bằng Bản Ghi CNAME"}, ButtonText: "Đăng Ký & Sử Dụng Ngay (Free)"},

@@ -15,21 +15,63 @@ import (
 	"mango-waf/logger"
 )
 
+// TelegramStatusInfo tracks telemetry and health status for Telegram alerts
+type TelegramStatusInfo struct {
+	Connected   bool      `json:"connected"`
+	LastSentAt  time.Time `json:"last_sent_at"`
+	LastError   string    `json:"last_error"`
+	TotalSent   int64     `json:"total_sent"`
+	TotalFailed int64     `json:"total_failed"`
+}
+
 // AlertManager handles multi-channel alerts with rate limiting
 type AlertManager struct {
-	cfg      *config.Config
-	mu       sync.Mutex
-	lastSent map[string]time.Time // rate limit per alert type
-	cooldown time.Duration
+	cfg        *config.Config
+	mu         sync.Mutex
+	lastSent   map[string]time.Time // rate limit per alert type
+	cooldown   time.Duration
+	queue      chan func()
+	tgStatus   TelegramStatusInfo
+	statusLock sync.RWMutex
 }
 
 // NewAlertManager creates a new alert manager
 func NewAlertManager(cfg *config.Config) *AlertManager {
-	return &AlertManager{
+	am := &AlertManager{
 		cfg:      cfg,
 		lastSent: make(map[string]time.Time),
 		cooldown: 5 * time.Minute, // Tăng cooldown mặc định lên 5 phút để chống spam
+		queue:    make(chan func(), 1000),
+		tgStatus: TelegramStatusInfo{
+			Connected: cfg.Alerts.Telegram.Enabled && cfg.Alerts.Telegram.Token != "" && cfg.Alerts.Telegram.ChatID != "",
+		},
 	}
+	go am.workerLoop()
+	return am
+}
+
+func (a *AlertManager) UpdateConfig(cfg *config.Config) {
+	if a == nil || cfg == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.cfg = cfg
+}
+
+func (a *AlertManager) workerLoop() {
+	for job := range a.queue {
+		if job != nil {
+			job()
+		}
+	}
+}
+
+// GetTelegramStatus returns current Telegram integration health telemetry
+func (a *AlertManager) GetTelegramStatus() TelegramStatusInfo {
+	a.statusLock.RLock()
+	defer a.statusLock.RUnlock()
+	return a.tgStatus
 }
 
 // RemoteSilence is called when another node in the mesh has already sent an alert
@@ -44,13 +86,6 @@ func (a *AlertManager) RemoteSilence(alertType string) {
 func (a *AlertManager) canSend(alertType string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-
-	// Multi-node Cluster Leader Election: Only 1 elected leader node sends Telegram alerts to prevent duplicate messages
-	if m := cluster.GetMesh(); m != nil && m.NumMembers() > 1 {
-		if !m.IsLeader() {
-			return false
-		}
-	}
 
 	// Rate limit: 5 phút cho các cảnh báo tấn công, 30s cho các loại khác
 	cd := a.cooldown
@@ -73,8 +108,20 @@ func (a *AlertManager) canSend(alertType string) bool {
 	return true
 }
 
+// ClearCooldown resets the rate limit for a specific alert type
+func (a *AlertManager) ClearCooldown(alertType string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.lastSent, alertType)
+}
+
 // SendDomainAttackStart sends attack start notification for a specific target domain with aggregated cluster metrics
 func (a *AlertManager) SendDomainAttackStart(domain string, totalRPS, totalConns int64) {
+	// Only the designated cluster leader sends external notifications to prevent duplication
+	if m := cluster.GetMesh(); m != nil && !m.IsLeader() {
+		return
+	}
+
 	if !a.canSend("attack_start_" + domain) {
 		return
 	}
@@ -139,6 +186,11 @@ var (
 
 // SendDomainAttackEnd sends attack end notification for a specific target domain
 func (a *AlertManager) SendDomainAttackEnd(domain string, duration time.Duration, blocked int64) {
+	// Only the designated cluster leader sends external notifications to prevent duplication
+	if m := cluster.GetMesh(); m != nil && !m.IsLeader() {
+		return
+	}
+
 	if !a.canSend("attack_end_" + domain) {
 		return
 	}
@@ -149,6 +201,9 @@ func (a *AlertManager) SendDomainAttackEnd(domain string, duration time.Duration
 		lastDomainAttackTime = time.Now()
 		domainAttackActiveMu.Unlock()
 	}
+
+	// Reset cooldown for attack_start so the NEXT attack triggers an alert immediately
+	a.ClearCooldown("attack_start_" + domain)
 
 	durStr := formatDuration(duration)
 
@@ -321,14 +376,20 @@ type DiscordFooter struct {
 // ================================================
 
 func (a *AlertManager) sendAllRich(telegramHTML string, discordEmbed DiscordEmbed) {
-	if a.cfg.Alerts.Telegram.Enabled {
-		go a.sendTelegram(telegramHTML)
-	}
-	if a.cfg.Alerts.Discord.Enabled {
-		go a.sendDiscord(discordEmbed)
-	}
-	if a.cfg.Alerts.Webhook.Enabled {
-		go a.sendWebhook(telegramHTML)
+	select {
+	case a.queue <- func() {
+		if a.cfg.Alerts.Telegram.Enabled {
+			a.sendTelegram(telegramHTML)
+		}
+		if a.cfg.Alerts.Discord.Enabled {
+			a.sendDiscord(discordEmbed)
+		}
+		if a.cfg.Alerts.Webhook.Enabled {
+			a.sendWebhook(telegramHTML)
+		}
+	}:
+	default:
+		logger.Warn("Alert queue full, dropping notification")
 	}
 }
 
@@ -347,12 +408,38 @@ func (a *AlertManager) sendTelegram(html string) {
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.PostForm(apiURL, data)
-	if err != nil {
-		logger.Error("Telegram gửi thất bại", "error", err)
-		return
+	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+	var lastErr error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err := client.PostForm(apiURL, data)
+		if err == nil {
+			if resp.StatusCode == 200 {
+				resp.Body.Close()
+				a.statusLock.Lock()
+				a.tgStatus.Connected = true
+				a.tgStatus.LastSentAt = time.Now()
+				a.tgStatus.TotalSent++
+				a.statusLock.Unlock()
+				return
+			}
+			lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
+			resp.Body.Close()
+		} else {
+			lastErr = err
+		}
+
+		if attempt < 2 {
+			time.Sleep(backoffs[attempt])
+		}
 	}
-	resp.Body.Close()
+
+	logger.Error("Telegram gửi thất bại sau khi retry", "error", lastErr)
+	a.statusLock.Lock()
+	a.tgStatus.Connected = false
+	a.tgStatus.LastError = fmt.Sprintf("%v", lastErr)
+	a.tgStatus.TotalFailed++
+	a.statusLock.Unlock()
 }
 
 func (a *AlertManager) sendDiscord(embed DiscordEmbed) {

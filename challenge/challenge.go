@@ -52,7 +52,17 @@ func NewManager(cfg *config.Config) *Manager {
 func (m *Manager) UpdateConfig(cfg *config.Config) {
 	if cfg != nil {
 		m.cfg = cfg
+		m.ClearCache()
 	}
+}
+
+// ClearCache clears the verified IPs cache
+func (m *Manager) ClearCache() {
+	m.verifiedIPs.Range(func(key, value any) bool {
+		m.verifiedIPs.Delete(key)
+		return true
+	})
+	logger.Info("Challenge manager verified IPs cache cleared due to config reload")
 }
 
 func (m *Manager) startEvictionWorker() {
@@ -93,8 +103,10 @@ func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
 	}
 
 	cookie, err := r.Cookie("mango_proof")
+	isProof := true
 	if err != nil || cookie.Value == "" {
 		cookie, err = r.Cookie("mango_session")
+		isProof = false
 		if err != nil || cookie.Value == "" {
 			return false
 		}
@@ -136,12 +148,14 @@ func (m *Manager) VerifyProof(r *http.Request, currentIP string) bool {
 		return false
 	}
 
-	// Cache IP verification in memory for 1 hour so subsequent requests are fast-tracked 0ms
-	ttl := m.cfg.Protection.Challenge.CookieTTL
-	if ttl <= 0 {
-		ttl = 1 * time.Hour
+	// Cache IP verification in memory for 1 hour ONLY if they solved a challenge (presented mango_proof)
+	if isProof {
+		ttl := m.cfg.Protection.Challenge.CookieTTL
+		if ttl <= 0 {
+			ttl = 1 * time.Hour
+		}
+		m.verifiedIPs.Store(currentIP, time.Now().Add(ttl))
 	}
-	m.verifiedIPs.Store(currentIP, time.Now().Add(ttl))
 	return true
 }
 
@@ -157,11 +171,7 @@ func (m *Manager) SetProofCookie(w http.ResponseWriter, r *http.Request, ip stri
 
 // SetSessionCookie sets a signed seamless session cookie for active visitors
 func (m *Manager) SetSessionCookie(w http.ResponseWriter, r *http.Request, ip string) {
-	ttl := m.cfg.Protection.Challenge.CookieTTL
-	if ttl <= 0 {
-		ttl = 1 * time.Hour
-	}
-	m.verifiedIPs.Store(ip, time.Now().Add(ttl))
+	// DO NOT store IP in verifiedIPs for seamless session cookies, only trust the cookie.
 	m.setCookieWithName(w, r, ip, "mango_session")
 }
 

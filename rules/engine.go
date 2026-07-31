@@ -2,6 +2,7 @@ package rules
 
 import (
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -56,12 +57,14 @@ type Rule struct {
 	Targets      []string // URL, ARGS, HEADERS, BODY, COOKIE, UA, METHOD
 	Operator     string   // rx (regex), eq, contains, beginsWith, endsWith, gt, lt
 	Pattern      string
-	PatternLower string
-	Compiled     *regexp.Regexp
+	PatternLower    string
+	RequiredKeyword string
+	Compiled        *regexp.Regexp
 	Action       string // block, log, challenge, drop
 	Enabled      bool
 	Tags         []string
 	Paranoia     int // 1-4 paranoia level
+	Hits         int64
 }
 
 // MatchResult holds the result of a rule match
@@ -127,8 +130,26 @@ func (e *Engine) Inspect(r *http.Request) *InspectResult {
 		return result
 	}
 
-	// Zero-allocation request data wrapper
+	// Zero-allocation request data wrapper (pass by value, lazy evaluation)
 	reqData := extractRequestData(r)
+
+	// Build a single concatenated string for fast keyword pre-filtering
+	var pb strings.Builder
+	pb.Grow(1024)
+	pb.WriteString(reqData.PathLower)
+	pb.WriteByte('|')
+	pb.WriteString(reqData.QueryLower)
+	pb.WriteByte('|')
+	pb.WriteString(reqData.MethodLower)
+	pb.WriteByte('|')
+	for _, h := range reqData.getHeaders() {
+		pb.WriteString(h.lower)
+		pb.WriteByte('|')
+	}
+	if cookie := r.Header.Get("Cookie"); cookie != "" {
+		pb.WriteString(strings.ToLower(cookie))
+	}
+	fullPayload := pb.String()
 
 	for _, rule := range rules {
 		if !rule.Enabled {
@@ -138,15 +159,19 @@ func (e *Engine) Inspect(r *http.Request) *InspectResult {
 			continue
 		}
 
-		match := e.matchRule(rule, reqData)
+		// Fast-path Request-Level Keyword Pre-filtering
+		// Reduces O(N * Targets) down to O(N) simple string lookups
+		if rule.RequiredKeyword != "" && !strings.Contains(fullPayload, rule.RequiredKeyword) {
+			continue
+		}
+
+		match := e.matchRule(rule, &reqData)
 		if match.Matched {
 			result.Matches = append(result.Matches, match)
 			result.Score += severityScore(rule.Severity)
 
 			atomic.AddInt64(&e.stats.TotalMatched, 1)
-			e.stats.statsMu.Lock()
-			e.stats.RuleHits[rule.ID]++
-			e.stats.statsMu.Unlock()
+			atomic.AddInt64(&rule.Hits, 1)
 
 			if rule.Action == "block" || rule.Action == "drop" {
 				result.Blocked = true
@@ -174,22 +199,67 @@ func (e *Engine) Inspect(r *http.Request) *InspectResult {
 
 // requestData holds zero-allocation request data wrappers for inspection
 type requestData struct {
-	r      *http.Request
-	URL    string
-	Path   string
-	Query  string
-	Method string
-	UA     string
+	r            *http.Request
+	url          string
+	urlLower     string
+	ua           string
+	uaLower      string
+	Path         string
+	PathLower    string
+	Query        string
+	QueryLower   string
+	Method       string
+	MethodLower  string
+	headers      []headerVal
+	headersDone  bool
 }
 
-func extractRequestData(r *http.Request) *requestData {
-	return &requestData{
-		r:      r,
-		URL:    r.URL.String(),
-		Path:   r.URL.Path,
-		Query:  r.URL.RawQuery,
-		Method: r.Method,
-		UA:     r.UserAgent(),
+type headerVal struct {
+	raw   string
+	lower string
+}
+
+func (rd *requestData) getURL() (string, string) {
+	if rd.url == "" && rd.r.URL != nil {
+		rd.url = rd.r.URL.String()
+		rd.urlLower = strings.ToLower(rd.url)
+	}
+	return rd.url, rd.urlLower
+}
+
+func (rd *requestData) getUA() (string, string) {
+	if rd.ua == "" {
+		rd.ua = rd.r.UserAgent()
+		rd.uaLower = strings.ToLower(rd.ua)
+	}
+	return rd.ua, rd.uaLower
+}
+
+func (rd *requestData) getHeaders() []headerVal {
+	if !rd.headersDone {
+		rd.headers = make([]headerVal, 0, len(rd.r.Header))
+		for _, vals := range rd.r.Header {
+			for _, val := range vals {
+				rd.headers = append(rd.headers, headerVal{
+					raw:   val,
+					lower: strings.ToLower(val),
+				})
+			}
+		}
+		rd.headersDone = true
+	}
+	return rd.headers
+}
+
+func extractRequestData(r *http.Request) requestData {
+	return requestData{
+		r:           r,
+		Path:        r.URL.Path,
+		PathLower:   strings.ToLower(r.URL.Path),
+		Query:       r.URL.RawQuery,
+		QueryLower:  strings.ToLower(r.URL.RawQuery),
+		Method:      r.Method,
+		MethodLower: strings.ToLower(r.Method),
 	}
 }
 
@@ -198,47 +268,66 @@ func (e *Engine) matchRule(rule *Rule, rd *requestData) MatchResult {
 	for _, target := range rule.Targets {
 		switch target {
 		case "URL":
-			if e.matchOperator(rule, rd.URL) {
-				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.URL, 100), Target: target}
+			urlStr, urlLower := rd.getURL()
+			if e.matchOperator(rule, urlStr, urlLower) {
+				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(urlStr, 100), Target: target}
 			}
 		case "PATH":
-			if e.matchOperator(rule, rd.Path) {
+			if e.matchOperator(rule, rd.Path, rd.PathLower) {
 				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.Path, 100), Target: target}
 			}
 		case "QUERY":
-			if e.matchOperator(rule, rd.Query) {
+			if e.matchOperator(rule, rd.Query, rd.QueryLower) {
 				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.Query, 100), Target: target}
 			}
 		case "METHOD":
-			if e.matchOperator(rule, rd.Method) {
+			if e.matchOperator(rule, rd.Method, rd.MethodLower) {
 				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.Method, 100), Target: target}
 			}
 		case "UA":
-			if e.matchOperator(rule, rd.UA) {
-				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(rd.UA, 100), Target: target}
+			uaStr, uaLower := rd.getUA()
+			if e.matchOperator(rule, uaStr, uaLower) {
+				return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(uaStr, 100), Target: target}
 			}
 		case "HEADERS":
-			for _, vals := range rd.r.Header {
-				for _, val := range vals {
-					if e.matchOperator(rule, val) {
-						return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(val, 100), Target: target}
-					}
+			for _, h := range rd.getHeaders() {
+				if e.matchOperator(rule, h.raw, h.lower) {
+					return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(h.raw, 100), Target: target}
 				}
 			}
 		case "ARGS":
 			if rd.Query != "" {
-				for _, vals := range rd.r.URL.Query() {
-					for _, val := range vals {
-						if e.matchOperator(rule, val) {
-							return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(val, 100), Target: target}
-						}
+				var matched bool
+				var matchedVal string
+				forEachQueryArg(rd.Query, func(val string) bool {
+					valLower := strings.ToLower(val)
+					if e.matchOperator(rule, val, valLower) {
+						matched = true
+						matchedVal = val
+						return true
 					}
+					return false
+				})
+				if matched {
+					return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(matchedVal, 100), Target: target}
 				}
 			}
 		case "COOKIES":
-			for _, c := range rd.r.Cookies() {
-				if e.matchOperator(rule, c.Value) {
-					return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(c.Value, 100), Target: target}
+			cookieHeader := rd.r.Header.Get("Cookie")
+			if cookieHeader != "" {
+				var matched bool
+				var matchedVal string
+				forEachCookieValue(cookieHeader, func(val string) bool {
+					valLower := strings.ToLower(val)
+					if e.matchOperator(rule, val, valLower) {
+						matched = true
+						matchedVal = val
+						return true
+					}
+					return false
+				})
+				if matched {
+					return MatchResult{Matched: true, Rule: rule, MatchedVal: truncate(matchedVal, 100), Target: target}
 				}
 			}
 		}
@@ -246,10 +335,64 @@ func (e *Engine) matchRule(rule *Rule, rd *requestData) MatchResult {
 	return MatchResult{Matched: false}
 }
 
-func (e *Engine) matchOperator(rule *Rule, value string) bool {
+func forEachQueryArg(query string, cb func(val string) bool) {
+	for query != "" {
+		var part string
+		if i := strings.IndexAny(query, "&;"); i >= 0 {
+			part, query = query[:i], query[i+1:]
+		} else {
+			part, query = query, ""
+		}
+		if part == "" {
+			continue
+		}
+		val := part
+		if i := strings.Index(part, "="); i >= 0 {
+			val = part[i+1:]
+		}
+		if strings.Contains(val, "%") {
+			if decoded, err := url.QueryUnescape(val); err == nil {
+				val = decoded
+			}
+		}
+		if cb(val) {
+			return
+		}
+	}
+}
+
+func forEachCookieValue(cookieHeader string, cb func(val string) bool) {
+	for cookieHeader != "" {
+		var part string
+		if i := strings.Index(cookieHeader, ";"); i >= 0 {
+			part, cookieHeader = cookieHeader[:i], cookieHeader[i+1:]
+		} else {
+			part, cookieHeader = cookieHeader, ""
+		}
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		val := part
+		if i := strings.Index(part, "="); i >= 0 {
+			val = part[i+1:]
+		}
+		if len(val) > 1 && val[0] == '"' && val[len(val)-1] == '"' {
+			val = val[1 : len(val)-1]
+		}
+		if cb(val) {
+			return
+		}
+	}
+}
+
+func (e *Engine) matchOperator(rule *Rule, value, valueLower string) bool {
 	switch rule.Operator {
 	case "rx":
 		if rule.Compiled != nil {
+			if rule.RequiredKeyword != "" && !strings.Contains(valueLower, rule.RequiredKeyword) {
+				return false
+			}
 			return rule.Compiled.MatchString(value)
 		}
 		return false
@@ -263,7 +406,7 @@ func (e *Engine) matchOperator(rule *Rule, value string) bool {
 		if pat == "" {
 			pat = strings.ToLower(rule.Pattern)
 		}
-		return strings.Contains(strings.ToLower(value), pat)
+		return strings.Contains(valueLower, pat)
 	case "eq":
 		return strings.EqualFold(value, rule.Pattern)
 	case "beginsWith":
@@ -271,13 +414,13 @@ func (e *Engine) matchOperator(rule *Rule, value string) bool {
 		if pat == "" {
 			pat = strings.ToLower(rule.Pattern)
 		}
-		return strings.HasPrefix(strings.ToLower(value), pat)
+		return strings.HasPrefix(valueLower, pat)
 	case "endsWith":
 		pat := rule.PatternLower
 		if pat == "" {
 			pat = strings.ToLower(rule.Pattern)
 		}
-		return strings.HasSuffix(strings.ToLower(value), pat)
+		return strings.HasSuffix(valueLower, pat)
 	default:
 		return false
 	}
@@ -292,6 +435,9 @@ func (e *Engine) AddRule(rule *Rule) error {
 			return err
 		}
 		rule.Compiled = compiled
+
+		// Fast-path: extract exact literal keyword if rule contains a fixed substring
+		rule.RequiredKeyword = extractRequiredKeyword(rule.PatternLower)
 	}
 
 	e.mu.Lock()
@@ -331,4 +477,34 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func extractRequiredKeyword(pat string) string {
+	// If pattern contains disjunctions (OR |, character sets []), we cannot guarantee a single keyword
+	if strings.ContainsAny(pat, "|[]()?*+^$") {
+		return ""
+	}
+
+	var current strings.Builder
+	var longest string
+
+	for i := 0; i < len(pat); i++ {
+		ch := pat[i]
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-' {
+			current.WriteByte(ch)
+		} else {
+			if current.Len() > len(longest) {
+				longest = current.String()
+			}
+			current.Reset()
+		}
+	}
+	if current.Len() > len(longest) {
+		longest = current.String()
+	}
+
+	if len(longest) >= 4 {
+		return longest
+	}
+	return ""
 }

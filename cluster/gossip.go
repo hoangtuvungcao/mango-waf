@@ -3,7 +3,9 @@ package cluster
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -222,13 +224,23 @@ func InitMesh(cfg config.ClusterConfig, handleBan func(string, time.Duration), h
 
 	nodeName := cfg.NodeName
 	if nodeName == "" {
-		host, _ := os.Hostname()
-		if host != "" && host != "localhost" {
-			nodeName = host
-		} else if advIP != "" {
-			nodeName = "mango-node-" + advIP
+		pubIP := getMyPublicIP()
+		if pubIP != "" {
+			nodeName = "mango-node-" + pubIP
 		} else {
-			nodeName = "mango-node-primary"
+			host, _ := os.Hostname()
+			if host != "" && host != "localhost" {
+				nodeName = host
+			} else if advIP != "" {
+				nodeName = "mango-node-" + advIP
+			} else {
+				nodeName = "mango-node-primary"
+			}
+		}
+	} else {
+		pubIP := getMyPublicIP()
+		if pubIP != "" && !strings.Contains(nodeName, pubIP) {
+			nodeName = nodeName + "-" + pubIP
 		}
 	}
 	mCfg.Name = nodeName
@@ -442,11 +454,15 @@ func (n *MeshNode) IsLeader() bool {
 	if n == nil || n.list == nil {
 		return true // Standalone mode is always leader
 	}
+	local := n.list.LocalNode()
+	if local == nil {
+		return true
+	}
 	members := n.list.Members()
 	if len(members) <= 1 {
 		return true
 	}
-	myKey := fmt.Sprintf("%s_%s", n.cfg.NodeName, n.cfg.AdvertiseIP)
+	myKey := fmt.Sprintf("%s_%s", local.Name, local.Addr.String())
 	lowestKey := myKey
 	for _, m := range members {
 		key := fmt.Sprintf("%s_%s", m.Name, m.Addr.String())
@@ -492,4 +508,33 @@ func (n *MeshNode) Close() {
 		n.list.Leave(time.Second * 5)
 		n.list.Shutdown()
 	}
+}
+
+var publicIPOnce sync.Once
+var myPublicIP = ""
+
+func getMyPublicIP() string {
+	publicIPOnce.Do(func() {
+		urls := []string{
+			"https://api.ipify.org",
+			"https://ifconfig.me/ip",
+			"https://icanhazip.com",
+		}
+		client := &http.Client{Timeout: 3 * time.Second}
+		for _, url := range urls {
+			resp, err := client.Get(url)
+			if err == nil {
+				defer resp.Body.Close()
+				bytes, err := io.ReadAll(resp.Body)
+				if err == nil {
+					ip := strings.TrimSpace(string(bytes))
+					if net.ParseIP(ip) != nil {
+						myPublicIP = ip
+						break
+					}
+				}
+			}
+		}
+	})
+	return myPublicIP
 }

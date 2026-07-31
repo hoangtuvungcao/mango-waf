@@ -27,8 +27,9 @@ import (
 	"mango-waf/logger"
 	"mango-waf/perf"
 	"mango-waf/rules"
-
+	"syscall"
 	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/sys/unix"
 )
 
 // Shield is the main Mango Shield server
@@ -55,7 +56,7 @@ type Shield struct {
 	ctx               context.Context
 	cancel            context.CancelFunc
 	wg                sync.WaitGroup
-	domainReqs        sync.Map // domain -> *int64
+	domainReqs        sync.Map // domain -> *DomainCounter
 	domainLastReqs    sync.Map // domain -> int64
 	domainRPS         sync.Map // domain -> int64
 	domainUnderAttack sync.Map // domain -> bool
@@ -106,6 +107,12 @@ type Stats struct {
 	IsUnderAttack   bool
 	CurrentStage    int32
 	AttackStartTime time.Time
+}
+
+// DomainCounter is a cache-line padded counter for high-throughput tracking
+type DomainCounter struct {
+	Reqs int64
+	_    [56]byte
 }
 
 // New creates a new Shield instance
@@ -244,6 +251,11 @@ func (s *Shield) ReloadConfig(newCfg *config.Config) {
 		s.intel.UpdateConfig(newCfg)
 	}
 
+	// Update Alert Manager Config live
+	if s.pipeline != nil && s.pipeline.alerts != nil {
+		s.pipeline.alerts.UpdateConfig(newCfg)
+	}
+
 	logger.Info("WAF Security Policies & Configuration reloaded dynamically in real-time",
 		"mode", newCfg.Protection.Mode,
 		"paranoia", newCfg.WAF.ParanoiaLevel,
@@ -315,11 +327,50 @@ func (s *Shield) Start() error {
 		if s.cfg.TLS.MinVersion == "1.3" {
 			minVer = tls.VersionTLS13
 		}
+		certMap := make(map[string]*tls.Certificate)
+		for i := range certs {
+			c := &certs[i]
+			x509Cert, errParse := x509.ParseCertificate(c.Certificate[0])
+			if errParse == nil {
+				if x509Cert.Subject.CommonName != "" {
+					certMap[strings.ToLower(x509Cert.Subject.CommonName)] = c
+				}
+				for _, dnsName := range x509Cert.DNSNames {
+					certMap[strings.ToLower(dnsName)] = c
+				}
+			}
+		}
+
 		tlsConfig = &tls.Config{
 			Certificates:           certs,
+			NextProtos:             []string{"h3", "h2", "http/1.1"},
 			MinVersion:             minVer,
 			SessionTicketsDisabled: false,
 			ClientSessionCache:     tls.NewLRUClientSessionCache(10000),
+			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				if hello == nil || hello.ServerName == "" {
+					if len(certs) > 0 {
+						return &certs[0], nil
+					}
+					return nil, nil
+				}
+				serverName := strings.ToLower(hello.ServerName)
+				if cert, ok := certMap[serverName]; ok {
+					return cert, nil
+				}
+				for name, cert := range certMap {
+					if strings.HasPrefix(name, "*.") {
+						suffix := name[1:]
+						if strings.HasSuffix(serverName, suffix) {
+							return cert, nil
+						}
+					}
+				}
+				if len(certs) > 0 {
+					return &certs[0], nil
+				}
+				return nil, fmt.Errorf("no certificate available for server_name: %s", hello.ServerName)
+			},
 			CipherSuites: []uint16{
 				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
@@ -379,6 +430,10 @@ func (s *Shield) Start() error {
 		ReadHeaderTimeout: 1500 * time.Millisecond,
 		MaxHeaderBytes:    s.cfg.Server.MaxHeaderBytes,
 		ConnState: func(conn net.Conn, state http.ConnState) {
+			if state != http.StateNew && state != http.StateClosed && state != http.StateHijacked {
+				return
+			}
+
 			remoteAddr := conn.RemoteAddr().String()
 			ip, _, _ := net.SplitHostPort(remoteAddr)
 
@@ -422,7 +477,7 @@ func (s *Shield) Start() error {
 	}
 
 	var err error
-	baseListener, err := net.Listen("tcp", listenAddr)
+	baseListener, err := listenSOReuseport("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
@@ -496,21 +551,27 @@ func (s *Shield) normalizeHost(host string) string {
 	return host
 }
 
-// IsDomainUnderAttack returns whether a specific domain is currently under attack
+// IsDomainUnderAttack returns whether a specific domain is currently under attack or configured in forced protection mode
 func (s *Shield) IsDomainUnderAttack(host string) bool {
 	host = s.normalizeHost(host)
 	for _, d := range s.cfg.Domains {
 		dName := strings.ToLower(d.Name)
 		if host == dName || strings.HasSuffix(host, "."+dName) || strings.Contains(host, dName) {
+			if d.ProtectionMode == "under_attack" || d.ProtectionMode == "emergency" || d.ProtectionMode == "challenge" || d.ProtectionMode == "captcha" {
+				return true
+			}
 			if val, ok := s.domainUnderAttack.Load(dName); ok {
 				return val.(bool)
 			}
 		}
 	}
+	if s.cfg != nil && (s.cfg.Protection.Mode == "under_attack" || s.cfg.Protection.Mode == "emergency") {
+		return true
+	}
 	if val, ok := s.domainUnderAttack.Load(host); ok {
 		return val.(bool)
 	}
-	return false // Strict Per-Domain Isolation: other domains remain 100% unaffected when 1 domain is attacked
+	return false
 }
 
 // GetDomainRPS returns current RPS for a domain
@@ -545,27 +606,35 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Increment per-domain request counter
 		hostDomain := s.normalizeHost(r.Host)
-		v, _ := s.domainReqs.LoadOrStore(hostDomain, new(int64))
-		atomic.AddInt64(v.(*int64), 1)
+		v, ok := s.domainReqs.Load(hostDomain)
+		if !ok {
+			v, _ = s.domainReqs.LoadOrStore(hostDomain, &DomainCounter{})
+		}
+		atomic.AddInt64(&v.(*DomainCounter).Reqs, 1)
 	}
 
 	// Extract client IP
 	ip := s.extractIP(r)
 
-	// Fast-path static logo asset serving with long-term immutable caching
-	if r.URL.Path == "/logo-mango.png" || r.URL.Path == "/logo-mango-small.png" || r.URL.Path == "/assets/logo-mango.png" {
+	// Fast-path static logo & favicon asset serving with long-term immutable caching
+	if r.URL.Path == "/logo-mango.png" || r.URL.Path == "/logo-mango-small.png" || r.URL.Path == "/assets/logo-mango.png" || r.URL.Path == "/favicon.ico" || r.URL.Path == "/apple-touch-icon.png" {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-		w.Header().Set("Content-Type", "image/png")
 		if r.URL.Path == "/logo-mango-small.png" {
 			if _, err := os.Stat("logo-mango-small.png"); err == nil {
+				w.Header().Set("Content-Type", "image/png")
 				http.ServeFile(w, r, "logo-mango-small.png")
 				return
 			}
 		}
 		if _, err := os.Stat("logo-mango.png"); err == nil {
+			w.Header().Set("Content-Type", "image/png")
 			http.ServeFile(w, r, "logo-mango.png")
 			return
 		}
+		// Vector SVG fallback guaranteed never 404
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="32" height="32"><defs><linearGradient id="mGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient><linearGradient id="lGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad)"/></svg>`))
+		return
 	}
 
 	// Handle Challenge Form Verification BEFORE pipeline processing
@@ -579,15 +648,19 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// FAST-PATH: Verified human proof/session cookie (Zero-latency pass for clean verified visitors under DDoS)
-	if s.pipeline != nil && s.pipeline.hasValidProof(r) {
+	if s.pipeline != nil && s.pipeline.hasValidProof(r, ip) {
 		// Anti-Abuse Rate Limit: Enforce rate limit (Token Bucket) for verified users to prevent single-IP/session flooding (> 30-50 RPS)
 		if s.pipeline.detEngine != nil && s.pipeline.detEngine.CheckRateLimit(ip) {
 			atomic.AddInt64(&s.stats.BlockedRequests, 1)
-			GetLogStore().RecordEvent("SECURITY", ip, r.Host, r.Method, r.URL.Path, http.StatusTooManyRequests, "BLOCKED", "rate_limit", "Verified user exceeded RPS rate limit")
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("X-Mango-Shield", "rate-limited")
-			w.WriteHeader(http.StatusTooManyRequests)
-			w.Write([]byte("429 Too Many Requests - Verified Rate Limit Exceeded"))
+			GetLogStore().RecordEvent("SECURITY", ip, r.Host, r.Method, r.URL.Path, http.StatusForbidden, "BLOCKED", "rate_limit", "Verified user exceeded RPS rate limit")
+			if s.challMgr != nil {
+				s.challMgr.ServeRateLimitPage(w, r, ip, 10)
+			} else {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.Header().Set("X-Mango-Shield", "rate-limited")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte("403 Forbidden - Rate Limit Exceeded"))
+			}
 			return
 		}
 
@@ -666,7 +739,7 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		GetLogStore().RecordEvent("ACCESS", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusOK, "PASSED", "-", "Proxy pass to upstream")
 
 		// Seamless active user session cookie: issue cookie to active visitors so DDoS attacks never prompt them with Captcha!
-		if s.challMgr != nil && !s.pipeline.hasValidProof(r) {
+		if s.challMgr != nil && !s.pipeline.hasValidProof(r, ip) {
 			s.challMgr.SetSessionCookie(w, r, ip)
 		}
 
@@ -747,7 +820,12 @@ func (s *Shield) startHTTPRedirect() {
 		IdleTimeout:  30 * time.Second,
 	}
 	logger.Info("HTTP redirect server", "listen", s.cfg.Server.HTTPListen)
-	redirect.ListenAndServe()
+	rlis, err := listenSOReuseport("tcp", s.cfg.Server.HTTPListen)
+	if err != nil {
+		logger.Error("HTTP redirect server listen failed", "error", err)
+		return
+	}
+	redirect.Serve(rlis)
 }
 
 // rpsCounter tracks requests per second globally and per domain
@@ -776,7 +854,7 @@ func (s *Shield) rpsCounter() {
 			for _, d := range s.cfg.Domains {
 				dName := strings.ToLower(d.Name)
 				if v, ok := s.domainReqs.Load(dName); ok {
-					curr := atomic.LoadInt64(v.(*int64))
+					curr := atomic.LoadInt64(&v.(*DomainCounter).Reqs)
 					last := int64(0)
 					if l, ok2 := s.domainLastReqs.Load(dName); ok2 {
 						last = l.(int64)
@@ -955,45 +1033,30 @@ func (s *Shield) adaptiveSampler() {
 
 // extractIP gets real client IP from request safely
 func (s *Shield) extractIP(r *http.Request) string {
-	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		peerHost = r.RemoteAddr
-	}
-
 	// Always prioritize Cloudflare connecting IP if header is present
 	if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
 		return trimSpace(cfip)
 	}
 
-	// Check if peer is in trusted proxies list
-	if len(s.cfg.Protection.TrustedProxies) > 0 {
-		isTrusted := false
-		for _, trusted := range s.cfg.Protection.TrustedProxies {
-			if trusted == peerHost {
-				isTrusted = true
-				break
-			}
-			_, cidr, err := net.ParseCIDR(trusted)
-			if err == nil {
-				ip := net.ParseIP(peerHost)
-				if ip != nil && cidr.Contains(ip) {
-					isTrusted = true
-					break
-				}
-			}
+	// Always check X-Forwarded-For or X-Real-IP if present
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := splitFirst(xff, ",")
+		ip := trimSpace(parts)
+		if ip != "" {
+			return ip
 		}
-
-		if isTrusted {
-			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-				parts := splitFirst(xff, ",")
-				return trimSpace(parts)
-			}
-			if xri := r.Header.Get("X-Real-IP"); xri != "" {
-				return trimSpace(xri)
-			}
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		ip := trimSpace(xri)
+		if ip != "" {
+			return ip
 		}
 	}
 
+	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
 	return peerHost
 }
 
@@ -1158,4 +1221,24 @@ func ensureTLSCertificates(cfg *config.Config, certFile, keyFile string) error {
 
 	logger.Info("Self-signed TLS certificates generated successfully", "cert", certFile, "key", keyFile, "cn", commonName, "dns", dnsNames)
 	return nil
+}
+
+func listenSOReuseport(network, address string) (net.Listener, error) {
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var opErr error
+			err := c.Control(func(fd uintptr) {
+				opErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+				if opErr != nil {
+					return
+				}
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_TCP, unix.TCP_FASTOPEN, 32)
+			})
+			if err != nil {
+				return err
+			}
+			return opErr
+		},
+	}
+	return lc.Listen(context.Background(), network, address)
 }

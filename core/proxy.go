@@ -111,6 +111,8 @@ func (s *Shield) getTransport() *http.Transport {
 	return sharedTransport
 }
 
+var proxyCache sync.Map // backend URL (string) -> *httputil.ReverseProxy
+
 // proxyRequest forwards the request to the backend
 func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Find next available upstream backend for this domain
@@ -128,16 +130,69 @@ func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Regular HTTP reverse proxy
-	target, err := url.Parse(backend)
-	if err != nil {
-		logger.Error("Invalid backend URL", "backend", backend, "error", err)
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-		return
-	}
+	v, ok := proxyCache.Load(backend)
+	var proxy *httputil.ReverseProxy
+	if ok {
+		proxy = v.(*httputil.ReverseProxy)
+	} else {
+		target, err := url.Parse(backend)
+		if err != nil {
+			logger.Error("Invalid backend URL", "backend", backend, "error", err)
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			return
+		}
 
-	// Zero-latency cached target host resolution for port 8080
-	if strings.Contains(target.Host, "8080") {
-		target.Host = get8080TargetHost()
+		// Zero-latency cached target host resolution for port 8080
+		if strings.Contains(target.Host, "8080") {
+			target.Host = get8080TargetHost()
+		}
+
+		proxy = httputil.NewSingleHostReverseProxy(target)
+		proxy.Transport = s.getTransport()
+
+		// Configure Director to forward Host headers and protocol
+		originalDirector := proxy.Director
+		proxy.Director = func(req *http.Request) {
+			originalDirector(req)
+			req.Host = req.Header.Get("X-Forwarded-Host")
+		}
+
+		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			logger.Error("Proxy error", "backend", backend, "error", err)
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		}
+
+		// Intercept Response to Store in Cache & Rewrite Location redirects
+		proxy.ModifyResponse = func(resp *http.Response) error {
+			// Rewrite backend IP in Location header to original Host domain
+			if loc := resp.Header.Get("Location"); loc != "" {
+				if target.Host != "" && strings.Contains(loc, target.Host) {
+					origHost := resp.Request.Header.Get("X-Forwarded-Host")
+					if origHost == "" {
+						origHost = resp.Request.Host
+					}
+					resp.Header.Set("Location", strings.ReplaceAll(loc, target.Host, origHost))
+				}
+			}
+
+			cdn := GetCDN()
+			if cdn != nil && s.cfg.CDN.Enabled {
+				cacheBypass := resp.Request.Header.Get("X-Mango-Cache-Bypass") == "true"
+				cacheKey := resp.Request.Header.Get("X-Mango-Cache-Key")
+				if cacheBypass {
+					resp.Header.Set("X-Mango-Cache", "BYPASS")
+				} else if cacheKey != "" {
+					resp.Header.Set("X-Mango-Cache", "MISS")
+					err := cdn.Store(cacheKey, resp.Request, resp)
+					if err != nil {
+						logger.Warn("Failed to cache response", "url", resp.Request.URL.Path, "error", err)
+					}
+				}
+			}
+			return nil
+		}
+
+		proxyCache.Store(backend, proxy)
 	}
 
 	// === ENTERPRISE CDN CACHING LAYER ===
@@ -166,50 +221,21 @@ func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	// === END CACHING LAYER ===
 
-	proxy := httputil.NewSingleHostReverseProxy(target)
-	proxy.Transport = s.getTransport()
-
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.Host = r.Host
-		req.Header.Set("X-Forwarded-Host", r.Host)
-		if r.TLS != nil {
-			req.Header.Set("X-Forwarded-Proto", "https")
-		} else {
-			req.Header.Set("X-Forwarded-Proto", "http")
-		}
-	}
-
-	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		logger.Error("Proxy error", "backend", backend, "error", err)
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-	}
-
-	// Intercept Response to Store in Cache & Rewrite Location redirects
-	proxy.ModifyResponse = func(resp *http.Response) error {
-		// Rewrite backend IP in Location header to original Host domain
-		if loc := resp.Header.Get("Location"); loc != "" {
-			if target.Host != "" && strings.Contains(loc, target.Host) {
-				resp.Header.Set("Location", strings.ReplaceAll(loc, target.Host, r.Host))
-			}
-		}
-
-		if cdn != nil && s.cfg.CDN.Enabled {
-			if cacheBypass {
-				resp.Header.Set("X-Mango-Cache", "BYPASS")
-			} else if cacheKey != "" {
-				resp.Header.Set("X-Mango-Cache", "MISS")
-				err := cdn.Store(cacheKey, r, resp)
-				if err != nil {
-					logger.Warn("Failed to cache response", "url", r.URL.Path, "error", err)
-				}
-			}
-		}
-		return nil
-	}
-
 	// Set forwarding headers with real client IP
+	r.Header.Set("X-Forwarded-Host", r.Host)
+	if r.TLS != nil {
+		r.Header.Set("X-Forwarded-Proto", "https")
+	} else {
+		r.Header.Set("X-Forwarded-Proto", "http")
+	}
+
+	if cacheBypass {
+		r.Header.Set("X-Mango-Cache-Bypass", "true")
+	}
+	if cacheKey != "" {
+		r.Header.Set("X-Mango-Cache-Key", cacheKey)
+	}
+
 	clientIP := s.extractIP(r)
 	r.Header.Set("X-Real-IP", clientIP)
 	if cfIP := r.Header.Get("CF-Connecting-IP"); cfIP != "" {
@@ -218,7 +244,6 @@ func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	} else {
 		r.Header.Set("X-Forwarded-For", clientIP)
 	}
-	r.Header.Set("X-Forwarded-Proto", "https")
 	r.Header.Set("X-Mango-Shield", "v2.0")
 
 	proxy.ServeHTTP(w, r)
@@ -227,6 +252,12 @@ func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 // isWebSocket checks if the request is a WebSocket upgrade
 func isWebSocket(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+var wsBufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 32*1024)
+	},
 }
 
 // proxyWebSocket handles WebSocket proxy
@@ -259,14 +290,18 @@ func (s *Shield) proxyWebSocket(w http.ResponseWriter, r *http.Request, backend 
 		return
 	}
 
-	// Bidirectional copy
+	// Bidirectional copy with pooled buffers
 	errCh := make(chan error, 2)
 	go func() {
-		_, err := io.Copy(backendConn, clientConn)
+		buf := wsBufferPool.Get().([]byte)
+		defer wsBufferPool.Put(buf)
+		_, err := io.CopyBuffer(backendConn, clientConn, buf)
 		errCh <- err
 	}()
 	go func() {
-		_, err := io.Copy(clientConn, backendConn)
+		buf := wsBufferPool.Get().([]byte)
+		defer wsBufferPool.Put(buf)
+		_, err := io.CopyBuffer(clientConn, backendConn, buf)
 		errCh <- err
 	}()
 

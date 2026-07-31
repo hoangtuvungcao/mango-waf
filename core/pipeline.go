@@ -45,7 +45,7 @@ type Pipeline struct {
 	shield        *Shield
 	cfg           *config.Config
 	domainModeMap map[string]string // domain -> protection_mode
-	ipStates      sync.Map          // map[string]*IPState
+	ipStates      *IPStateMap       // 256-shard high-concurrency map
 	banned        sync.Map          // map[string]time.Time
 	whitelist     sync.Map          // map[string]time.Time
 	activeConns   sync.Map          // map[string]*int64
@@ -70,7 +70,7 @@ type IPState struct {
 	RequestCount     int64
 	RPS              int
 	LastReset        time.Time
-	LastSeen         time.Time
+	LastSeen         int64 // atomic unix nanoseconds
 	Stage            int
 	Fails            int
 	TrustScore       float64
@@ -83,6 +83,86 @@ type IPState struct {
 	RateLimitHits    int
 	CPS              int
 	ConnLastReset    time.Time
+	IsTrustedProxy   bool
+	ActiveConns      int32
+}
+
+const ipShardCount = 256
+
+type ipStateShard struct {
+	mu sync.RWMutex
+	m  map[string]*IPState
+}
+
+type IPStateMap struct {
+	shards [ipShardCount]*ipStateShard
+}
+
+func newIPStateMap() *IPStateMap {
+	m := &IPStateMap{}
+	for i := 0; i < ipShardCount; i++ {
+		m.shards[i] = &ipStateShard{
+			m: make(map[string]*IPState, 2048),
+		}
+	}
+	return m
+}
+
+func fnv32IP(key string) uint32 {
+	hash := uint32(2166136261)
+	const prime32 = uint32(16777619)
+	for i := 0; i < len(key); i++ {
+		hash ^= uint32(key[i])
+		hash *= prime32
+	}
+	return hash
+}
+
+func (m *IPStateMap) getShard(ip string) *ipStateShard {
+	return m.shards[fnv32IP(ip)%ipShardCount]
+}
+
+func (m *IPStateMap) GetOrCreate(ip string, isTrusted bool, now time.Time) *IPState {
+	shard := m.getShard(ip)
+	shard.mu.RLock()
+	state, ok := shard.m[ip]
+	shard.mu.RUnlock()
+
+	if ok {
+		atomic.StoreInt64(&state.LastSeen, now.UnixNano())
+		return state
+	}
+
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	if state, ok = shard.m[ip]; ok {
+		atomic.StoreInt64(&state.LastSeen, now.UnixNano())
+		return state
+	}
+
+	state = &IPState{
+		LastReset:      now,
+		FirstSeen:      now,
+		LastSeen:       now.UnixNano(),
+		TrustScore:     50,
+		IsTrustedProxy: isTrusted,
+	}
+	shard.m[ip] = state
+	return state
+}
+
+func (m *IPStateMap) Cleanup(now time.Time, ttl time.Duration) {
+	for i := 0; i < ipShardCount; i++ {
+		shard := m.shards[i]
+		shard.mu.Lock()
+		for ip, state := range shard.m {
+			lastSeenNs := atomic.LoadInt64(&state.LastSeen)
+			if now.UnixNano()-lastSeenNs > int64(ttl) {
+				delete(shard.m, ip)
+			}
+		}
+		shard.mu.Unlock()
+	}
 }
 
 // NewPipeline creates a new processing pipeline
@@ -99,6 +179,7 @@ func NewPipeline(s *Shield) *Pipeline {
 		shield:        s,
 		cfg:           s.cfg,
 		domainModeMap: domainModeMap,
+		ipStates:      newIPStateMap(),
 		alerts:        NewAlertManager(s.cfg),
 		xdpMgr:        NewXDPManager(s.cfg),
 	}
@@ -175,9 +256,8 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 	}
 
 	// Layer 0.1: Verified proof cookie (Human user bypass for anti-DDoS rate limits & challenges)
-	if p.hasValidProof(r) {
-		return Action{Type: ActionAllow, Reason: "verified_human"}
-	}
+	// REMOVED: Early ActionAllow bypasses rate limits. We now let it fall through and bypass challenges inside determineStageWithFP.
+
 
 	// Layer 0.2: Static assets & stats endpoints bypass
 	if isStaticAsset(r.URL.Path) {
@@ -235,8 +315,9 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 			return Action{Type: ActionBlock, Reason: "fp_malicious"}
 		}
 
-		// Trusted browser fingerprint → fast-track (skip challenge if target domain is not under attack)
-		if fp.IsTrusted() && !p.shield.IsDomainUnderAttack(r.Host) {
+		// Trusted browser fingerprint → fast-track (skip challenge ONLY if domain mode is auto/off/monitor and not under attack)
+		domainMode := p.resolveDomainMode(r)
+		if fp.IsTrusted() && !p.shield.IsDomainUnderAttack(r.Host) && (domainMode == "off" || domainMode == "auto" || domainMode == "monitor" || domainMode == "") {
 			return Action{Type: ActionAllow, Reason: "fp_trusted:" + fp.Composite.Verdict}
 		}
 
@@ -291,7 +372,12 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 			hits := state.RateLimitHits
 			state.mu.Unlock()
 
-			if hits > 15 {
+			limit := p.cfg.Protection.RateLimit.RequestsPerSecond
+			if limit <= 0 {
+				limit = 50
+			}
+
+			if hits > limit {
 				atomic.AddInt64(&p.shield.stats.BlockedRequests, 1)
 				// Offload flood bot IP directly into NIC eBPF/XDP hardware map!
 				if !p.isTrustedProxy(ip) {
@@ -375,7 +461,7 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 				"ip", ip, "type", classResult.BotType, "name", classResult.BotName, "confidence", classResult.Confidence)
 			return Action{Type: ActionDrop, Reason: "bot:" + classResult.BotType}
 		}
-		if classResult.IsBot && classResult.Threat == "high" && !p.hasValidProof(r) {
+		if classResult.IsBot && classResult.Threat == "high" && !p.hasValidProof(r, ip) {
 			diff := p.cfg.Protection.Challenge.PowDifficulty + 1
 			if diff > 4 {
 				diff = 4
@@ -394,7 +480,7 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 
 	// Layer 9: Rate limiting via detection engine (adaptive token bucket)
 	if p.detEngine != nil && p.cfg.Protection.RateLimit.Enabled {
-		if p.detEngine.CheckRateLimit(ip) && !p.hasValidProof(r) {
+		if p.detEngine.CheckRateLimit(ip) && !p.hasValidProof(r, ip) {
 			return Action{Type: ActionChallenge, Reason: "det_rate_limited", Stage: 1, Difficulty: p.cfg.Protection.Challenge.PowDifficulty}
 		}
 	}
@@ -404,10 +490,13 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 	p.updateRPS(state)
 
 	domainMode := p.resolveDomainMode(r)
-	stage := p.determineStageWithFP(state, r, fp, domainMode)
+	stage := p.determineStageWithFP(state, ip, r, fp, domainMode)
 
 	// Stage 4 triggers an immediate TCP Drop (no HTTP response sent) to save maximum network bandwidth/CPU.
 	if stage == 4 {
+		if !p.isTrustedProxy(ip) {
+			p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
+		}
 		return Action{Type: ActionDrop, Reason: "auto_l7_drop"}
 	}
 
@@ -512,7 +601,7 @@ func (p *Pipeline) isBadUA(r *http.Request) bool {
 }
 
 // determineStageWithFP determines challenge stage with fingerprint awareness
-func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fingerprint.ConnectionFingerprint, domainMode string) int {
+func (p *Pipeline) determineStageWithFP(state *IPState, ip string, r *http.Request, fp *fingerprint.ConnectionFingerprint, domainMode string) int {
 	mode := domainMode
 	isDomainUnderAttack := p.shield.IsDomainUnderAttack(r.Host)
 
@@ -520,60 +609,62 @@ func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fin
 	case "off", "monitor":
 		return 0
 	case "silent":
-		if p.hasValidProof(r) {
+		if p.hasValidProof(r, ip) {
 			return 0
 		}
 		return 3
 	case "challenge":
-		if p.hasValidProof(r) {
+		if p.hasValidProof(r, ip) {
 			return 0
 		}
 		return 1
 	case "captcha":
-		if p.hasValidProof(r) {
+		if p.hasValidProof(r, ip) {
 			return 0
 		}
 		return 2
 	case "emergency":
-		if p.hasValidProof(r) {
+		if p.hasValidProof(r, ip) {
 			return 0
 		}
 		return 4 // Drop all unauthenticated traffic
 	case "under_attack":
-		if p.hasValidProof(r) {
+		if p.hasValidProof(r, ip) {
 			return 0
 		}
 		return 2 // Strict PoW challenge for all unverified traffic
 	case "auto":
-		if p.hasValidProof(r) {
+		if p.hasValidProof(r, ip) {
 			return 0
 		}
 
 		limit := p.cfg.Protection.RateLimit.RequestsPerSecond
 		systemRPS := atomic.LoadInt64(&p.shield.stats.CurrentRPS)
 		threshold := int64(p.cfg.Protection.Emergency.RPSThreshold)
+		if threshold <= 0 {
+			threshold = 50
+		}
 
 		// 1. Extreme System Load (DDoS Tsunami)
 		if systemRPS > threshold*2 {
 			if state.RPS > limit*2 {
-				return 4 // Drop instantly
+				return 4 // Drop instantly at kernel layer
 			}
 			return 2 // Turnstile Captcha
 		}
 
-		// 2. Smart Per-IP Behavioral Analysis
+		// 2. Aggregate DDoS Attack Active -> Enforce JS PoW / CAPTCHA on ALL unverified traffic!
+		if isDomainUnderAttack || systemRPS > threshold {
+			if state.RPS > limit*2 {
+				return 2 // Captcha for high RPS surge
+			}
+			return 1 // JS PoW Challenge for ALL unverified traffic (stops distributed botnets!)
+		}
+
+		// 3. Smart Per-IP Behavioral Analysis under normal baseline
 		if fp != nil {
 			switch {
 			case fp.Composite.Total >= 60: // High trust: known browsers
-				if isDomainUnderAttack {
-					if state.RPS > limit*4 {
-						return 2 // Extremely high RPS during attack -> Captcha
-					}
-					if state.RPS > limit*2 {
-						return 1 // High RPS during attack -> JS Challenge
-					}
-					return 0 // Seamless even under attack if RPS is very low
-				}
 				if state.RPS > limit*4 {
 					return 2 // Extremely high RPS -> Captcha
 				}
@@ -582,61 +673,41 @@ func (p *Pipeline) determineStageWithFP(state *IPState, r *http.Request, fp *fin
 				}
 				return 0
 
-			case fp.Composite.Total >= 30: // Medium trust: Incognito / Unknown but likely legit
-				if isDomainUnderAttack {
-					if state.RPS > limit*2 {
-						return 2 // High RPS during attack -> Captcha
-					}
-					if state.RPS > 10 { // Moderate RPS during attack -> JS Challenge
-						return 1
-					}
-					return 0 // Seamless for normal browsing even under attack
-				}
+			case fp.Composite.Total >= 30: // Medium trust: Incognito / Likely legit
 				if state.RPS > limit*3 {
 					return 2 // Very high RPS -> Captcha
 				}
 				if state.RPS > limit*3/2 {
 					return 1 // Moderate-High RPS -> JS Challenge
 				}
-				return 0 // Seamless for normal browsing (Incognito Fix)
+				return 0
 
-			default: // Low trust: Score < 30 (Bots, automated scripts, or suspicious)
-				if isDomainUnderAttack {
-					if state.RPS > limit {
-						return 2 // High RPS from suspicious source during attack -> Captcha
-					}
-					return 1 // Suspected bot during attack -> JS Challenge
-				}
+			default: // Low trust: Score < 30 (Bots / Suspicious)
 				if state.RPS > limit {
 					return 1 // Moderate RPS from suspicious source -> JS Challenge
 				}
-				return 0 // Seamless for first visit even if suspicious (allows Check-host etc)
+				return 0
 			}
 		}
 
-		// Fallback (no fingerprinting available yet)
-		if isDomainUnderAttack {
-			if state.RPS > limit {
-				return 2 // Captcha during attack if RPS is high
-			}
-			return 1 // JS Challenge otherwise
-		}
+		// Fallback (no fingerprinting available)
 		if state.RPS > limit*2 {
-			return 2 // Captcha for very high RPS
+			return 2
 		}
 		if state.RPS > limit {
-			return 1 // JS Challenge for moderate RPS
+			return 1
 		}
 		return 0 // Truly seamless for first-time visitors when system is healthy
 	}
 	return 0
 }
 
-// hasValidProof checks if the request has a valid PoW proof cookie
-func (p *Pipeline) hasValidProof(r *http.Request) bool {
+// hasValidProof checks if the request has a valid PoW proof cookie or dynamic whitelist
+func (p *Pipeline) hasValidProof(r *http.Request, ip string) bool {
+	if p.hasDynamicWhitelist(ip) {
+		return true
+	}
 	if p.shield != nil && p.shield.challMgr != nil {
-		// Extract client IP
-		ip := extractIP(r)
 		return p.shield.challMgr.VerifyProof(r, ip)
 	}
 	return false
@@ -644,19 +715,7 @@ func (p *Pipeline) hasValidProof(r *http.Request) bool {
 
 // getState gets or creates IP state
 func (p *Pipeline) getState(ip string) *IPState {
-	now := time.Now()
-	v, loaded := p.ipStates.LoadOrStore(ip, &IPState{
-		LastReset:  now,
-		FirstSeen:  now,
-		TrustScore: 50,
-	})
-	state := v.(*IPState)
-	if loaded {
-		state.mu.Lock()
-		state.LastSeen = now
-		state.mu.Unlock()
-	}
-	return state
+	return p.ipStates.GetOrCreate(ip, p.checkIsTrustedProxy(ip), time.Now())
 }
 
 // updateRPS updates the per-IP RPS counter
@@ -675,34 +734,25 @@ func (p *Pipeline) updateRPS(s *IPState) {
 
 // getConnCount gets the active connection count for an IP
 func (p *Pipeline) getConnCount(ip string) int {
-	v, ok := p.connCount.Load(ip)
-	if !ok {
-		return 0
-	}
-	return v.(int)
+	state := p.getState(ip)
+	return int(atomic.LoadInt32(&state.ActiveConns))
 }
 
 // IncrementConnCount increments the active connection count for an IP
 func (p *Pipeline) IncrementConnCount(ip string) int {
-	v, _ := p.connCount.LoadOrStore(ip, 0)
-	count := v.(int) + 1
-	p.connCount.Store(ip, count)
-	return count
+	state := p.getState(ip)
+	return int(atomic.AddInt32(&state.ActiveConns, 1))
 }
 
 // DecrementConnCount decrements the active connection count for an IP
 func (p *Pipeline) DecrementConnCount(ip string) int {
-	v, ok := p.connCount.Load(ip)
-	if !ok {
+	state := p.getState(ip)
+	val := atomic.AddInt32(&state.ActiveConns, -1)
+	if val < 0 {
+		atomic.StoreInt32(&state.ActiveConns, 0)
 		return 0
 	}
-	count := v.(int) - 1
-	if count <= 0 {
-		p.connCount.Delete(ip)
-		return 0
-	}
-	p.connCount.Store(ip, count)
-	return count
+	return int(val)
 }
 
 // isBanned checks if an IP is banned
@@ -722,8 +772,36 @@ func (p *Pipeline) isBanned(ip string) bool {
 	return true
 }
 
-// isTrustedProxy checks if an IP belongs to trusted proxies (e.g. Cloudflare)
+var defaultCloudflareCIDRs = []string{
+	"173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+	"141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+	"197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+	"104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+	"2400:cb00::/32", "2606:4700::/32", "2803:f800::/32", "2405:b500::/32",
+	"2405:8100::/32", "2a06:98c0::/29", "2c0f:f248::/32",
+}
+
+var defaultCloudflareNets []*net.IPNet
+
+func init() {
+	for _, cidr := range defaultCloudflareCIDRs {
+		_, network, err := net.ParseCIDR(cidr)
+		if err == nil {
+			defaultCloudflareNets = append(defaultCloudflareNets, network)
+		}
+	}
+}
+
+// isTrustedProxy checks if an IP belongs to trusted proxies (e.g. Cloudflare) using cached state
 func (p *Pipeline) isTrustedProxy(ipStr string) bool {
+	if ipStr == "" {
+		return false
+	}
+	return p.getState(ipStr).IsTrustedProxy
+}
+
+// checkIsTrustedProxy checks if an IP belongs to trusted proxies by scanning CIDRs
+func (p *Pipeline) checkIsTrustedProxy(ipStr string) bool {
 	if ipStr == "" {
 		return false
 	}
@@ -732,31 +810,40 @@ func (p *Pipeline) isTrustedProxy(ipStr string) bool {
 		return false
 	}
 
-	for _, trusted := range p.cfg.Protection.TrustedProxies {
-		if trusted == ipStr {
+	// Always trust Cloudflare proxy IPs
+	for _, netObj := range defaultCloudflareNets {
+		if netObj.Contains(parsedIP) {
 			return true
 		}
-		_, cidr, err := net.ParseCIDR(trusted)
-		if err == nil && cidr.Contains(parsedIP) {
-			return true
+	}
+
+	if p.cfg != nil {
+		for _, trusted := range p.cfg.Protection.TrustedProxies {
+			if trusted == ipStr {
+				return true
+			}
+			_, cidr, err := net.ParseCIDR(trusted)
+			if err == nil && cidr.Contains(parsedIP) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// isWhitelisted checks if an IP is whitelisted (static or dynamic)
+// isWhitelisted checks if an IP is whitelisted (static config only)
 func (p *Pipeline) isWhitelisted(ip string) bool {
-	if p.isTrustedProxy(ip) {
-		return true
-	}
 	// Check static whitelist from config
 	for _, w := range p.cfg.Protection.WhitelistIPs {
 		if ip == w {
 			return true
 		}
 	}
+	return false
+}
 
-	// Check dynamic whitelist (passed challenges)
+// hasDynamicWhitelist checks if an IP recently passed a challenge
+func (p *Pipeline) hasDynamicWhitelist(ip string) bool {
 	v, ok := p.whitelist.Load(ip)
 	if !ok {
 		return false
@@ -794,11 +881,10 @@ func (p *Pipeline) CheckConnRate(ip string) bool {
 	return true
 }
 
-// BanIPLocal is called by engines locally to ban an IP and broadcast it to the mesh
+// BanIPLocal bans an IP locally, pushes to eBPF/XDP kernel map, and broadcasts to cluster mesh
 func (p *Pipeline) BanIPLocal(ip string, duration time.Duration) {
-	if p.isTrustedProxy(ip) || p.isWhitelisted(ip) {
-		logger.Info("Refusing to ban trusted proxy or whitelisted IP", "ip", ip)
-		return
+	if ip == "" || p.isTrustedProxy(ip) || p.checkIsTrustedProxy(ip) || p.isWhitelisted(ip) {
+		return // CRITICAL: NEVER ban Cloudflare proxy IPs or whitelisted IPs in eBPF/iptables!
 	}
 	p.banIP(ip, duration)
 
@@ -864,6 +950,23 @@ func (p *Pipeline) UnbanIP(ip string) {
 	logger.Info("IP manually unbanned", "ip", ip)
 }
 
+// GetBannedIPsList returns the current list of banned IPs with expiry times
+func (p *Pipeline) GetBannedIPsList() []string {
+	now := time.Now()
+	var result []string
+	p.banned.Range(func(key, value interface{}) bool {
+		expiry := value.(time.Time)
+		if now.Before(expiry) {
+			ttl := int64(expiry.Sub(now).Seconds())
+			result = append(result, fmt.Sprintf("%s|%s|%d", key.(string), expiry.Format("2006-01-02 15:04:05"), ttl))
+		} else {
+			p.banned.Delete(key)
+		}
+		return true
+	})
+	return result
+}
+
 // UnbanAllIPs clears all banned IPs from memory and eBPF
 func (p *Pipeline) UnbanAllIPs() {
 	p.banned.Range(func(key, value interface{}) bool {
@@ -902,13 +1005,7 @@ func (p *Pipeline) Cleanup() {
 		return true
 	})
 
-	p.ipStates.Range(func(key, value interface{}) bool {
-		state := value.(*IPState)
-		if now.Sub(state.LastSeen) > 10*time.Minute {
-			p.ipStates.Delete(key)
-		}
-		return true
-	})
+	p.ipStates.Cleanup(now, 10*time.Minute)
 }
 
 func isStaticAsset(path string) bool {

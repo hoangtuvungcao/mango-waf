@@ -49,11 +49,19 @@ type ConfigCenter struct {
 var globalCenter *ConfigCenter
 var centerOnce sync.Once
 
+// InitCenter initializes the global ConfigCenter instance with a specific configuration path
+func InitCenter(yamlPath string) *ConfigCenter {
+	centerOnce.Do(func() {
+		globalCenter = NewCenter(yamlPath)
+	})
+	return globalCenter
+}
+
 // GetCenter returns the global ConfigCenter instance
 func GetCenter() *ConfigCenter {
-	centerOnce.Do(func() {
-		globalCenter = NewCenter("config/production.yaml")
-	})
+	if globalCenter == nil {
+		return InitCenter("config/production.yaml")
+	}
 	return globalCenter
 }
 
@@ -514,13 +522,13 @@ func DefaultConfig() *Config {
 		},
 		Domains: []DomainConfig{
 			{
-				Name:      "fw.hidev.dev",
+				Name:      "waf.local",
 				Upstreams: []UpstreamConfig{{URL: "http://127.0.0.1:1234", Weight: 1}},
 				SSL:       true,
 				Owner:     "admin",
 			},
 			{
-				Name:      "firewall.hidev.dev",
+				Name:      "app.local",
 				Upstreams: []UpstreamConfig{{URL: "http://127.0.0.1:8080", Weight: 1}},
 				SSL:       true,
 				Owner:     "admin",

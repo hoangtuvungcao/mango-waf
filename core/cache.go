@@ -2,8 +2,6 @@ package core
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -88,12 +86,9 @@ func (cm *CDNManager) GetStats() (int64, int64, int64) {
 	return atomic.LoadInt64(&cm.stats.Hits), atomic.LoadInt64(&cm.stats.Misses), atomic.LoadInt64(&cm.stats.Bypasses)
 }
 
-// GenerateCacheKey creates a unique key for the request
+// GenerateCacheKey creates a unique key for the request using fast string concatenation
 func (cm *CDNManager) GenerateCacheKey(r *http.Request) string {
-	// Format: METHOD_HOST_PATH_QUERY
-	raw := fmt.Sprintf("%s_%s_%s_%s", r.Method, r.Host, r.URL.Path, r.URL.RawQuery)
-	hash := sha256.Sum256([]byte(raw))
-	return hex.EncodeToString(hash[:])
+	return r.Method + "_" + r.Host + "_" + r.URL.Path + "_" + r.URL.RawQuery
 }
 
 // ShouldBypass checks if the REQUEST should bypass the cache entirely
@@ -215,18 +210,26 @@ func (cm *CDNManager) Store(key string, r *http.Request, resp *http.Response) er
 		return nil
 	}
 
-	// 2. Read body
-	bodyBytes, err := io.ReadAll(resp.Body)
+	// 2. Read body with limit to prevent OOM on large files
+	limit := int64(5 * 1024 * 1024)
+	limitedReader := io.LimitReader(resp.Body, limit+1)
+	bodyBytes, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return err
 	}
-	// Restore body for the original response to continue processing
-	resp.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	// Max limit per item (e.g., 5MB) and ignore 0-byte empty bodies
-	if len(bodyBytes) == 0 || len(bodyBytes) > 5*1024*1024 {
+	if len(bodyBytes) == 0 {
 		return nil
 	}
+
+	if int64(len(bodyBytes)) > limit {
+		// Restore body correctly using MultiReader so backend can read it all
+		resp.Body = io.NopCloser(io.MultiReader(bytes.NewReader(bodyBytes), resp.Body))
+		return nil
+	}
+
+	// Restore body for the original response to continue processing
+	resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	// 3. Store
 	cachedResp := &CachedResponse{
@@ -237,9 +240,6 @@ func (cm *CDNManager) Store(key string, r *http.Request, resp *http.Response) er
 	}
 
 	cm.cache.SetWithTTL(key, cachedResp, int64(len(bodyBytes)), ttl)
-
-	// Wait a tiny bit for the async write to Ristretto
-	cm.cache.Wait()
 	return nil
 }
 
