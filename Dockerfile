@@ -23,7 +23,6 @@ COPY --from=builder /app/mango-shield .
 COPY --from=builder /app/config ./config
 COPY --from=builder /app/rules ./rules
 COPY --from=builder /app/xdp ./xdp
-COPY --from=builder /app/certs ./certs
 COPY --from=builder /app/assets ./assets
 
 # Create required directory structure
