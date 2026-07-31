@@ -23,6 +23,8 @@ import (
 	"mango-waf/core"
 	"mango-waf/intelligence"
 	"mango-waf/logger"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // BannedIPEntry is a single banned IP entry for the firewall ban list API
@@ -98,10 +100,22 @@ func (rb *RingBuffer) Slice() []int64 {
 	return out
 }
 
+func (d *Dashboard) getConfig() *config.Config {
+	return config.GetCenter().GetConfig()
+}
+
+func (d *Dashboard) getConfigClone() *config.Config {
+	raw := config.GetCenter().GetRawYAML()
+	var c config.Config
+	if err := yaml.Unmarshal([]byte(raw), &c); err != nil {
+		return d.getConfig()
+	}
+	return &c
+}
+
 // NewDashboard creates a new dashboard server
 func NewDashboard(cfg *config.Config, stats StatsProvider) *Dashboard {
 	d := &Dashboard{
-		cfg:       cfg,
 		stats:     stats,
 		mux:       http.NewServeMux(),
 		rpsHist:   &RingBuffer{},
@@ -182,7 +196,7 @@ func (d *Dashboard) registerRoutes() {
 }
 
 func (d *Dashboard) Start() error {
-	if !d.cfg.Dashboard.Enabled {
+	if !config.GetCenter().GetConfig().Dashboard.Enabled {
 		return nil
 	}
 
@@ -191,7 +205,7 @@ func (d *Dashboard) Start() error {
 	mux9090.HandleFunc("/", d.handleDashboardUI1234)
 
 	d.srv = &http.Server{
-		Addr:         d.cfg.Dashboard.Listen,
+		Addr:         config.GetCenter().GetConfig().Dashboard.Listen,
 		Handler:      d.authMiddleware(d.corsMiddleware(mux9090)),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
@@ -216,7 +230,7 @@ func (d *Dashboard) Start() error {
 		}
 	}()
 
-	logger.Info("Dashboard API & Command Center started", "listen", d.cfg.Dashboard.Listen)
+	logger.Info("Dashboard API & Command Center started", "listen", config.GetCenter().GetConfig().Dashboard.Listen)
 	return d.srv.ListenAndServe()
 }
 
@@ -289,8 +303,8 @@ func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
 	st.mu.RUnlock()
 
 	if authUser == nil {
-		uMatch := subtle.ConstantTimeCompare([]byte(req.Username), []byte(d.cfg.Dashboard.Username)) == 1
-		pMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(d.cfg.Dashboard.Password)) == 1
+		uMatch := subtle.ConstantTimeCompare([]byte(req.Username), []byte(config.GetCenter().GetConfig().Dashboard.Username)) == 1
+		pMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(config.GetCenter().GetConfig().Dashboard.Password)) == 1
 		if uMatch && pMatch {
 			authUser = &UserAccount{Username: req.Username, Role: "admin"}
 		}
@@ -383,7 +397,7 @@ func (d *Dashboard) handleDocs(w http.ResponseWriter, r *http.Request) {
 
 func (d *Dashboard) fetchPeerStats(endpoint string) []map[string]interface{} {
 	peerMap := make(map[string]bool)
-	for _, p := range d.cfg.Cluster.JoinPeers {
+	for _, p := range d.getConfig().Cluster.JoinPeers {
 		host, _, err := net.SplitHostPort(p)
 		if err == nil && host != "" {
 			peerMap[host] = true
@@ -393,7 +407,7 @@ func (d *Dashboard) fetchPeerStats(endpoint string) []map[string]interface{} {
 	}
 	if mesh := cluster.GetMesh(); mesh != nil {
 		for _, m := range mesh.GetMembers() {
-			if m.Addr != "" && m.Addr != d.cfg.Cluster.AdvertiseIP {
+			if m.Addr != "" && m.Addr != d.getConfig().Cluster.AdvertiseIP {
 				peerMap[m.Addr] = true
 			}
 		}
@@ -406,7 +420,7 @@ func (d *Dashboard) fetchPeerStats(endpoint string) []map[string]interface{} {
 	var mu sync.Mutex
 
 	for peerIP := range peerMap {
-		if peerIP == d.cfg.Cluster.AdvertiseIP || peerIP == "127.0.0.1" || peerIP == "localhost" || peerIP == "" {
+		if peerIP == d.getConfig().Cluster.AdvertiseIP || peerIP == "127.0.0.1" || peerIP == "localhost" || peerIP == "" {
 			continue
 		}
 
@@ -517,15 +531,15 @@ func (d *Dashboard) handleStats(w http.ResponseWriter, r *http.Request) {
 		"cache_bypasses":   cacheBypasses,
 		"mesh_enabled":     meshEnabled,
 		"mesh_members":     meshNodes,
-		"protection_mode":  d.cfg.Protection.Mode,
-		"domains":          len(d.cfg.Domains),
+		"protection_mode":  d.getConfig().Protection.Mode,
+		"domains":          len(d.getConfig().Domains),
 		"uptime_seconds":   time.Since(d.startTime).Seconds(),
 		"telegram": func() interface{} {
 			if d.alerts != nil {
 				return d.alerts.GetTelegramStatus()
 			}
 			return core.TelegramStatusInfo{
-				Connected: d.cfg.Alerts.Telegram.Enabled && d.cfg.Alerts.Telegram.Token != "" && d.cfg.Alerts.Telegram.ChatID != "",
+				Connected: d.getConfig().Alerts.Telegram.Enabled && d.getConfig().Alerts.Telegram.Token != "" && d.getConfig().Alerts.Telegram.ChatID != "",
 			}
 		}(),
 	})
@@ -548,9 +562,9 @@ func (d *Dashboard) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (d *Dashboard) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{
-		"mode": d.cfg.Protection.Mode, "domains": len(d.cfg.Domains),
-		"tls": d.cfg.TLS.Enabled, "waf": d.cfg.WAF.Enabled,
-		"fingerprint": map[string]bool{"ja3": d.cfg.Fingerprint.JA3.Enabled, "ja4": d.cfg.Fingerprint.JA4.Enabled},
+		"mode": d.getConfig().Protection.Mode, "domains": len(d.getConfig().Domains),
+		"tls": d.getConfig().TLS.Enabled, "waf": d.getConfig().WAF.Enabled,
+		"fingerprint": map[string]bool{"ja3": d.getConfig().Fingerprint.JA3.Enabled, "ja4": d.getConfig().Fingerprint.JA4.Enabled},
 	})
 }
 
@@ -840,7 +854,7 @@ func (d *Dashboard) handleSystemStats(w http.ResponseWriter, r *http.Request) {
 func (d *Dashboard) handleDashboardUI9090(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	html := managementPlatformHTML
-	cnameTarget := d.cfg.Cluster.CNAMETarget
+	cnameTarget := d.getConfig().Cluster.CNAMETarget
 	if cnameTarget == "" {
 		cnameTarget = "fw.hidev.dev"
 	}
@@ -851,7 +865,7 @@ func (d *Dashboard) handleDashboardUI9090(w http.ResponseWriter, _ *http.Request
 func (d *Dashboard) handleDashboardUI1234(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	html := managementPlatformHTML
-	cnameTarget := d.cfg.Cluster.CNAMETarget
+	cnameTarget := d.getConfig().Cluster.CNAMETarget
 	if cnameTarget == "" {
 		cnameTarget = "fw.hidev.dev"
 	}
@@ -906,21 +920,21 @@ func (d *Dashboard) handleDomains(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		cnameTarget := d.cfg.Cluster.CNAMETarget
+		cnameTarget := d.getConfig().Cluster.CNAMETarget
 		if cnameTarget == "" {
 			cnameTarget = "cname.local"
 		}
 		if CanManageAllDomains(role) {
 			writeJSON(w, map[string]interface{}{
 				"status":       "success",
-				"domains":      d.cfg.Domains,
+				"domains":      d.getConfig().Domains,
 				"cname_target": cnameTarget,
 			})
 			return
 		}
 		// Regular user: filter domains owned specifically by username
 		userDomains := make([]config.DomainConfig, 0)
-		for _, dom := range d.cfg.Domains {
+		for _, dom := range d.getConfig().Domains {
 			if dom.Owner == username {
 				userDomains = append(userDomains, dom)
 			}
@@ -947,34 +961,35 @@ func (d *Dashboard) handleDomains(w http.ResponseWriter, r *http.Request) {
 		}
 
 		found := false
-		for i, dom := range d.cfg.Domains {
+		cfgClone := d.getConfigClone()
+		for i, dom := range cfgClone.Domains {
 			if strings.EqualFold(dom.Name, req.Name) {
 				if role != "admin" && dom.Owner != "" && dom.Owner != username {
 					writeJSON(w, map[string]interface{}{"status": "error", "message": "You do not have permission to modify this domain"})
 					return
 				}
-				d.cfg.Domains[i] = req
+				cfgClone.Domains[i] = req
 				found = true
 				break
 			}
 		}
 		if !found {
-			d.cfg.Domains = append(d.cfg.Domains, req)
+			cfgClone.Domains = append(cfgClone.Domains, req)
 		}
 
 		st := GetStorage()
 		st.mu.Lock()
-		st.Data.Domains = d.cfg.Domains
+		st.Data.Domains = cfgClone.Domains
 		st.mu.Unlock()
 		_ = st.Save()
 
-		_ = config.GetCenter().UpdateConfig(d.cfg, username, role, fmt.Sprintf("Added domain %s", req.Name))
+		_ = config.GetCenter().UpdateConfig(cfgClone, username, role, fmt.Sprintf("Added domain %s", req.Name))
 		if r.Header.Get("X-Sync-Internal") != "true" {
 			go d.broadcastConfigToPeers(config.GetCenter().GetRawYAML(), username, fmt.Sprintf("Added domain %s", req.Name))
 		}
 
 		if d.stats != nil {
-			d.stats.UpdateUpstreams(d.cfg.Domains)
+			d.stats.UpdateUpstreams(cfgClone.Domains)
 		}
 
 		logger.Info("Domain added/updated via dashboard API", "domain", req.Name, "user", username)
@@ -986,27 +1001,28 @@ func (d *Dashboard) handleDomains(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		for i, dom := range d.cfg.Domains {
+		cfgClone := d.getConfigClone()
+		for i, dom := range cfgClone.Domains {
 			if strings.EqualFold(dom.Name, req.Name) {
 				if role != "admin" && dom.Owner != "" && dom.Owner != username {
 					writeJSON(w, map[string]interface{}{"status": "error", "message": "You do not have permission to modify this domain"})
 					return
 				}
-				d.cfg.Domains[i] = req
+				cfgClone.Domains[i] = req
 
 				st := GetStorage()
 				st.mu.Lock()
-				st.Data.Domains = d.cfg.Domains
+				st.Data.Domains = cfgClone.Domains
 				st.mu.Unlock()
 				_ = st.Save()
 
-				_ = config.GetCenter().UpdateConfig(d.cfg, username, role, fmt.Sprintf("Updated domain %s", req.Name))
+				_ = config.GetCenter().UpdateConfig(cfgClone, username, role, fmt.Sprintf("Updated domain %s", req.Name))
 				if r.Header.Get("X-Sync-Internal") != "true" {
 					go d.broadcastConfigToPeers(config.GetCenter().GetRawYAML(), username, fmt.Sprintf("Updated domain %s", req.Name))
 				}
 
 				if d.stats != nil {
-					d.stats.UpdateUpstreams(d.cfg.Domains)
+					d.stats.UpdateUpstreams(cfgClone.Domains)
 				}
 
 				logger.Info("Domain updated via dashboard API", "domain", req.Name, "user", username)
@@ -1023,8 +1039,9 @@ func (d *Dashboard) handleDomains(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		found := false
-		newDomains := make([]config.DomainConfig, 0, len(d.cfg.Domains))
-		for _, dom := range d.cfg.Domains {
+		cfgClone := d.getConfigClone()
+		newDomains := make([]config.DomainConfig, 0, len(cfgClone.Domains))
+		for _, dom := range cfgClone.Domains {
 			if strings.EqualFold(dom.Name, name) {
 				if role != "admin" && dom.Owner != "" && dom.Owner != username {
 					writeJSON(w, map[string]interface{}{"status": "error", "message": "You do not have permission to delete this domain"})
@@ -1039,21 +1056,21 @@ func (d *Dashboard) handleDomains(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]interface{}{"status": "error", "message": "domain not found"})
 			return
 		}
-		d.cfg.Domains = newDomains
+		cfgClone.Domains = newDomains
 
 		st := GetStorage()
 		st.mu.Lock()
-		st.Data.Domains = d.cfg.Domains
+		st.Data.Domains = cfgClone.Domains
 		st.mu.Unlock()
 		_ = st.Save()
 
-		_ = config.GetCenter().UpdateConfig(d.cfg, username, role, fmt.Sprintf("Deleted domain %s", name))
+		_ = config.GetCenter().UpdateConfig(cfgClone, username, role, fmt.Sprintf("Deleted domain %s", name))
 		if r.Header.Get("X-Sync-Internal") != "true" {
 			go d.broadcastConfigToPeers(config.GetCenter().GetRawYAML(), username, fmt.Sprintf("Deleted domain %s", name))
 		}
 
 		if d.stats != nil {
-			d.stats.UpdateUpstreams(d.cfg.Domains)
+			d.stats.UpdateUpstreams(cfgClone.Domains)
 		}
 
 		logger.Info("Domain deleted via dashboard API", "domain", name, "user", username)
@@ -1082,10 +1099,10 @@ func (d *Dashboard) handleSSLGenerate(w http.ResponseWriter, r *http.Request) {
 
 func (d *Dashboard) getClusterIPs() []string {
 	ipMap := make(map[string]bool)
-	if d.cfg.Cluster.AdvertiseIP != "" {
-		ipMap[d.cfg.Cluster.AdvertiseIP] = true
+	if d.getConfig().Cluster.AdvertiseIP != "" {
+		ipMap[d.getConfig().Cluster.AdvertiseIP] = true
 	}
-	for _, p := range d.cfg.Cluster.JoinPeers {
+	for _, p := range d.getConfig().Cluster.JoinPeers {
 		host, _, err := net.SplitHostPort(p)
 		if err == nil && host != "" {
 			ipMap[host] = true
@@ -1118,7 +1135,7 @@ func (d *Dashboard) handleDNSCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cnameTarget := d.cfg.Cluster.CNAMETarget
+	cnameTarget := d.getConfig().Cluster.CNAMETarget
 	if cnameTarget == "" {
 		cnameTarget = "fw.hidev.dev"
 	}
@@ -1187,10 +1204,10 @@ func (d *Dashboard) authMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if d.cfg.Dashboard.Username != "" && d.cfg.Dashboard.Password != "" {
+		if config.GetCenter().GetConfig().Dashboard.Username != "" && config.GetCenter().GetConfig().Dashboard.Password != "" {
 			user, pass, ok := r.BasicAuth()
-			uMatch := subtle.ConstantTimeCompare([]byte(user), []byte(d.cfg.Dashboard.Username)) == 1
-			pMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(d.cfg.Dashboard.Password)) == 1
+			uMatch := subtle.ConstantTimeCompare([]byte(user), []byte(config.GetCenter().GetConfig().Dashboard.Username)) == 1
+			pMatch := subtle.ConstantTimeCompare([]byte(pass), []byte(config.GetCenter().GetConfig().Dashboard.Password)) == 1
 			if ok && uMatch && pMatch {
 				next.ServeHTTP(w, r)
 				return
@@ -1359,7 +1376,7 @@ func (d *Dashboard) broadcastConfigToPeers(rawYAML string, author string, descri
 	peerMap := make(map[string]bool)
 
 	// 1. Read peers dynamically from configured JoinPeers in YAML
-	for _, p := range d.cfg.Cluster.JoinPeers {
+	for _, p := range d.getConfig().Cluster.JoinPeers {
 		host, _, err := net.SplitHostPort(p)
 		if err == nil && host != "" {
 			peerMap[host] = true
@@ -1371,7 +1388,7 @@ func (d *Dashboard) broadcastConfigToPeers(rawYAML string, author string, descri
 	// 2. Read connected peers dynamically from P2P memberlist
 	if mesh := cluster.GetMesh(); mesh != nil {
 		for _, m := range mesh.GetMembers() {
-			if m.Addr != "" && m.Addr != d.cfg.Cluster.AdvertiseIP {
+			if m.Addr != "" && m.Addr != d.getConfig().Cluster.AdvertiseIP {
 				peerMap[m.Addr] = true
 			}
 		}
@@ -1379,7 +1396,7 @@ func (d *Dashboard) broadcastConfigToPeers(rawYAML string, author string, descri
 
 	client := &http.Client{Timeout: 3 * time.Second}
 	for peerIP := range peerMap {
-		if peerIP == d.cfg.Cluster.AdvertiseIP || peerIP == "127.0.0.1" || peerIP == "localhost" || peerIP == "" {
+		if peerIP == d.getConfig().Cluster.AdvertiseIP || peerIP == "127.0.0.1" || peerIP == "localhost" || peerIP == "" {
 			continue
 		}
 		ports := []string{"9090", "1234"}
@@ -1799,9 +1816,10 @@ func (d *Dashboard) handleDomainProtectionMode(w http.ResponseWriter, r *http.Re
 
 	// Find and update the domain's protection mode
 	found := false
-	for i, dom := range d.cfg.Domains {
+	cfgClone := d.getConfigClone()
+		for i, dom := range cfgClone.Domains {
 		if strings.EqualFold(dom.Name, req.Domain) {
-			d.cfg.Domains[i].ProtectionMode = req.ProtectionMode
+			cfgClone.Domains[i].ProtectionMode = req.ProtectionMode
 			found = true
 			break
 		}
@@ -1815,7 +1833,7 @@ func (d *Dashboard) handleDomainProtectionMode(w http.ResponseWriter, r *http.Re
 	// Save to Storage center to persist it
 	st := GetStorage()
 	st.mu.Lock()
-	st.Data.Domains = d.cfg.Domains
+	st.Data.Domains = cfgClone.Domains
 	st.mu.Unlock()
 	_ = st.Save()
 
@@ -1824,7 +1842,7 @@ func (d *Dashboard) handleDomainProtectionMode(w http.ResponseWriter, r *http.Re
 	if modeLabel == "" {
 		modeLabel = "global (inherit)"
 	}
-	_ = config.GetCenter().UpdateConfig(d.cfg, username, role, fmt.Sprintf("Set protection mode for %s to %s", req.Domain, modeLabel))
+	_ = config.GetCenter().UpdateConfig(cfgClone, username, role, fmt.Sprintf("Set protection mode for %s to %s", req.Domain, modeLabel))
 	go d.broadcastConfigToPeers(config.GetCenter().GetRawYAML(), username, fmt.Sprintf("Set protection mode for %s to %s", req.Domain, modeLabel))
 
 	GetAuditLogger().LogAction(username, role, "DOMAIN_PROTECTION_MODE", "security", req.Domain, fmt.Sprintf("Mode: %s", modeLabel), clientIP, "success")
@@ -1836,10 +1854,7 @@ func (d *Dashboard) handleSecurityRules(w http.ResponseWriter, r *http.Request) 
 	clientIP := getClientIP(r)
 
 	// Single Source of Truth: Always load latest config from ConfigCenter
-	currentCfg := config.GetCenter().GetConfig()
-	if currentCfg == nil {
-		currentCfg = d.cfg
-	}
+	currentCfg := d.getConfig()
 
 	switch r.Method {
 	case http.MethodGet:
@@ -1860,6 +1875,7 @@ func (d *Dashboard) handleSecurityRules(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, map[string]interface{}{"status": "error", "message": "Access Denied: Only admins can manage global security rules"})
 			return
 		}
+		currentCfg = d.getConfigClone()
 
 		var req struct {
 			ProtectionMode   string   `json:"protection_mode"`
@@ -1911,7 +1927,7 @@ func (d *Dashboard) handleSecurityRules(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, map[string]interface{}{"status": "error", "message": err.Error()})
 			return
 		}
-		d.cfg = currentCfg
+
 
 		GetAuditLogger().LogAction(username, role, "SECURITY_UPDATE", "security", "global", fmt.Sprintf("Mode: %s, Paranoia: %d, RPS: %d, Burst: %d", currentCfg.Protection.Mode, currentCfg.WAF.ParanoiaLevel, currentCfg.Protection.RateLimit.RequestsPerSecond, currentCfg.Protection.RateLimit.Burst), clientIP, "success")
 		writeJSON(w, map[string]interface{}{"status": "success", "message": "Security rules updated & hot-reloaded successfully"})
@@ -1952,9 +1968,9 @@ func (d *Dashboard) handleClusterSync(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, map[string]interface{}{
 		"status":  "success",
-		"enabled": d.cfg.Cluster.Enabled,
-		"node":    d.cfg.Cluster.NodeName,
-		"port":    d.cfg.Cluster.BindPort,
+		"enabled": d.getConfig().Cluster.Enabled,
+		"node":    d.getConfig().Cluster.NodeName,
+		"port":    d.getConfig().Cluster.BindPort,
 		"members": members,
 		"count":   numNodes,
 	})
@@ -1969,11 +1985,11 @@ func (d *Dashboard) handleNodes(w http.ResponseWriter, r *http.Request) {
 
 	// Dynamic fallback from loaded YAML configuration if gossip mesh is initializing
 	if len(nodes) == 0 {
-		currNode := d.cfg.Cluster.NodeName
+		currNode := d.getConfig().Cluster.NodeName
 		if currNode == "" {
 			currNode = "mango-node-primary"
 		}
-		currIP := d.cfg.Cluster.AdvertiseIP
+		currIP := d.getConfig().Cluster.AdvertiseIP
 		if currIP == "" {
 			currIP = "127.0.0.1"
 		}
@@ -1983,7 +1999,7 @@ func (d *Dashboard) handleNodes(w http.ResponseWriter, r *http.Request) {
 			Addr: currIP,
 		})
 
-		for i, peer := range d.cfg.Cluster.JoinPeers {
+		for i, peer := range d.getConfig().Cluster.JoinPeers {
 			host, _, err := net.SplitHostPort(peer)
 			if err != nil || host == "" {
 				host = peer
@@ -2036,7 +2052,7 @@ func (d *Dashboard) handleNodes(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Map private IP to its public JoinPeer counterpart if available
-		if isPrivate && len(d.cfg.Cluster.JoinPeers) > 0 {
+		if isPrivate && len(d.getConfig().Cluster.JoinPeers) > 0 {
 			peerIdx := 0
 			for i, member := range nodes {
 				if member.Name == n.Name {
@@ -2044,10 +2060,10 @@ func (d *Dashboard) handleNodes(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
-			if peerIdx >= len(d.cfg.Cluster.JoinPeers) {
-				peerIdx = len(d.cfg.Cluster.JoinPeers) - 1
+			if peerIdx >= len(d.getConfig().Cluster.JoinPeers) {
+				peerIdx = len(d.getConfig().Cluster.JoinPeers) - 1
 			}
-			peerStr := d.cfg.Cluster.JoinPeers[peerIdx]
+			peerStr := d.getConfig().Cluster.JoinPeers[peerIdx]
 			host, _, err := net.SplitHostPort(peerStr)
 			if err == nil && host != "" {
 				ip = host
