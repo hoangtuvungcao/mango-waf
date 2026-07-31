@@ -460,9 +460,11 @@ func (s *Shield) Start() error {
 				// Concurrent Connection Limit
 				count := s.pipeline.IncrementConnCount(ip)
 				if count > s.cfg.Protection.ConnectionLimit.MaxPerIP {
-					s.pipeline.banIP(ip, s.cfg.Protection.Ban.Duration)
-					conn.Close()
-					return
+					if !s.pipeline.isTrustedProxy(ip) && !s.pipeline.isWhitelisted(ip) {
+						s.pipeline.banIP(ip, s.cfg.Protection.Ban.Duration)
+						conn.Close()
+						return
+					}
 				}
 			case http.StateClosed, http.StateHijacked:
 				if atomic.LoadInt64(&s.stats.ActiveConns) > 0 {
