@@ -215,14 +215,10 @@ func (s *Shield) ReloadConfig(newCfg *config.Config) {
 	s.cfg = newCfg
 	s.pipeline.cfg = newCfg
 
-	// Recompute O(1) domain protection mode map live
-	domainModeMap := make(map[string]string)
-	for _, d := range newCfg.Domains {
-		if d.ProtectionMode != "" {
-			domainModeMap[strings.ToLower(d.Name)] = d.ProtectionMode
-		}
-	}
+	// Recompute O(1) domain protection mode map and host validation map live
+	domainModeMap, validHostMap := buildDomainMaps(newCfg)
 	s.pipeline.domainModeMap = domainModeMap
+	s.pipeline.validHostMap = validHostMap
 
 	// Update Upstream Pools live
 	if s.upstreams != nil {
@@ -720,23 +716,8 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ALWAYS RUN WAF RULES INSPECTION FIRST (OWASP Top 10: SQLi, XSS, Path Traversal, RCE, Log4Shell)
-	if s.pipeline.wafEngine != nil && s.cfg.WAF.Enabled {
-		wafResult := s.pipeline.wafEngine.Inspect(r)
-		if wafResult.Blocked {
-			atomic.AddInt64(&s.stats.BlockedRequests, 1)
-			GetLogStore().RecordEvent("EXPLOIT", ip, r.Host, r.Method, r.URL.Path, http.StatusForbidden, "BLOCKED", wafResult.TopRule, fmt.Sprintf("WAF %s exploit blocked (score %d)", wafResult.TopRule, wafResult.Score))
-			if s.challMgr != nil {
-				s.challMgr.ServeBlockPage(w, r, ip, "WAF Exploit Protection", wafResult.TopRule)
-			} else {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.Header().Set("X-Mango-Shield", "blocked")
-				w.WriteHeader(http.StatusForbidden)
-				w.Write([]byte("403 Forbidden - WAF Protection"))
-			}
-			return
-		}
-	}
+	// WAF Rules Inspection: REMOVED from handleRequest — already done ONCE inside Pipeline.ProcessWithFingerprint() Layer 0.05
+	// Previously this was a TRIPLE scan (pipeline L0.05 + pipeline L5 + here) wasting 67% CPU on regex.
 
 	// Get TLS fingerprint for this connection
 	var connFP *fingerprint.ConnectionFingerprint
@@ -759,7 +740,7 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	switch action.Type {
 	case ActionAllow:
 		atomic.AddInt64(&s.stats.PassedRequests, 1)
-		GetLogStore().RecordEvent("ACCESS", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusOK, "PASSED", "-", "Proxy pass to upstream")
+		// PERF: RecordEvent REMOVED for ActionAllow — at 5M RPS this was creating 5M struct allocations/sec + GC storm
 
 		// Seamless active user session cookie: issue cookie to active visitors so DDoS attacks never prompt them with Captcha!
 		if s.challMgr != nil && !s.pipeline.hasValidProof(r, ip) {
@@ -784,7 +765,7 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	case ActionChallenge:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
-		GetLogStore().RecordEvent("CHALLENGE", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusForbidden, "CHALLENGE_REQUIRED", fmt.Sprintf("STAGE_%d", action.Stage), fmt.Sprintf("Security challenge triggered: %s", action.Reason))
+		GetLogStore().RecordEvent("CHALLENGE", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusForbidden, "CHALLENGE_REQUIRED", action.Reason, "Security challenge triggered")
 		if s.challMgr != nil {
 			s.challMgr.ServeChallenge(w, r, action.Stage, action.Difficulty)
 		} else {
