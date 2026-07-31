@@ -634,20 +634,9 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		dc := v.(*DomainCounter)
 		atomic.AddInt64(&dc.Reqs, 1)
 
-		// Limit maximum concurrent active connections per domain to prevent FD exhaustion and WAF crash
-		active := atomic.AddInt64(&dc.ActiveConns, 1)
+		// Track concurrent connections (without limiting)
+		atomic.AddInt64(&dc.ActiveConns, 1)
 		defer atomic.AddInt64(&dc.ActiveConns, -1)
-		
-		if active > 5000 {
-			w.Header().Set("X-Mango-Shield", "overload")
-			w.Header().Set("Retry-After", "5")
-			if s.challMgr != nil {
-				s.challMgr.ServeRateLimitPage(w, r, ip, 5)
-			} else {
-				http.Error(w, "503 Service Unavailable - Target Overloaded", http.StatusServiceUnavailable)
-			}
-			return
-		}
 	}
 
 	// Fast-path static logo & favicon asset serving with long-term immutable caching
