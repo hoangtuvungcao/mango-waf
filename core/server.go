@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"github.com/quic-go/quic-go/http3"
 	"golang.org/x/sys/unix"
 	"mango-waf/challenge"
@@ -423,7 +425,7 @@ func (s *Shield) Start() error {
 		TLSConfig:         tlsConfig,
 		ReadTimeout:       s.cfg.Server.ReadTimeout,
 		WriteTimeout:      s.cfg.Server.WriteTimeout,
-		IdleTimeout:       s.cfg.Server.IdleTimeout,
+		IdleTimeout:       30 * time.Second, // Aggressively drop idle connections to prevent socket exhaustion during DDoS
 		ReadHeaderTimeout: 1500 * time.Millisecond,
 		MaxHeaderBytes:    s.cfg.Server.MaxHeaderBytes,
 		ConnState: func(conn net.Conn, state http.ConnState) {
@@ -683,12 +685,25 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Handle Challenge Form Verification BEFORE pipeline processing
-	if r.Method == "POST" && r.FormValue("challenge_type") != "" {
-		if s.challMgr.HandleVerification(w, r, ip) {
-			GetLogStore().RecordEvent("CHALLENGE", ip, r.Host, r.Method, r.URL.Path, http.StatusOK, "CHALLENGE_SOLVED", "PoW/Turnstile", "Browser security challenge solved successfully")
-			// Redirect cleanly back to the same page using StatusSeeOther (HTTP 303)
-			http.Redirect(w, r, r.URL.RequestURI(), http.StatusSeeOther)
-			return
+	// We MUST buffer the body so r.ParseForm() doesn't consume it and break ReverseProxy for normal POSTs
+	if r.Method == "POST" && strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 1024*1024)) // 1MB limit for forms
+		r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+		if err := r.ParseForm(); err == nil && r.FormValue("challenge_type") != "" {
+			// Restore body AGAIN because r.ParseForm() consumed it!
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+			if s.challMgr.HandleVerification(w, r, ip) {
+				GetLogStore().RecordEvent("CHALLENGE", ip, r.Host, r.Method, r.URL.Path, http.StatusOK, "CHALLENGE_SOLVED", "PoW/Turnstile", "Browser security challenge solved successfully")
+				// Redirect cleanly back to the same page using StatusSeeOther (HTTP 303)
+				http.Redirect(w, r, r.URL.RequestURI(), http.StatusSeeOther)
+				return
+			}
+		} else {
+			// Restore body for normal pipeline / ReverseProxy
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 		}
 	}
 

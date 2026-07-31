@@ -92,6 +92,8 @@ func (a *AlertManager) canSend(alertType string) bool {
 	cd := a.cooldown
 	if strings.Contains(alertType, "ban_") {
 		cd = 30 * time.Second
+	} else if strings.HasPrefix(alertType, "attack_start_") || strings.HasPrefix(alertType, "attack_end_") {
+		cd = 0 // Bỏ rate limit, vì logic quản lý state ở server.go đã chống spam rồi
 	}
 
 	if last, ok := a.lastSent[alertType]; ok {

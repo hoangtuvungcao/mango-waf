@@ -351,7 +351,7 @@ func setDefaults(cfg *Config) {
 		cfg.Server.WriteTimeout = 30 * time.Second
 	}
 	if cfg.Server.IdleTimeout == 0 {
-		cfg.Server.IdleTimeout = 120 * time.Second
+		cfg.Server.IdleTimeout = 30 * time.Second
 	}
 	if cfg.Server.MaxHeaderBytes == 0 {
 		cfg.Server.MaxHeaderBytes = 65536

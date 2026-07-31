@@ -24,7 +24,7 @@ COPY --from=builder /app/config ./config
 COPY --from=builder /app/rules ./rules
 COPY --from=builder /app/xdp ./xdp
 COPY --from=builder /app/certs ./certs
-COPY --from=builder /app/world.svg .
+COPY --from=builder /app/assets ./assets
 
 # Create required directory structure
 RUN mkdir -p /app/logs /app/certs /app/data /sys/fs/bpf

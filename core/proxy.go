@@ -23,10 +23,10 @@ var sharedTransport = &http.Transport{
 	TLSClientConfig: &tls.Config{
 		InsecureSkipVerify: true,
 	},
-	MaxIdleConns:          10000,
-	MaxIdleConnsPerHost:   2000, // Safe pool size for 2-4GB VPS nodes without FD exhaustion
-	MaxConnsPerHost:       0,    // 0 = unlimited per host so verified requests never queue
-	IdleConnTimeout:       90 * time.Second,
+	MaxIdleConns:          1000,
+	MaxIdleConnsPerHost:   200, // Safe pool size for 2-4GB VPS nodes without FD exhaustion
+	MaxConnsPerHost:       0,   // 0 = unlimited per host so verified requests never queue
+	IdleConnTimeout:       30 * time.Second,
 	ResponseHeaderTimeout: 5 * time.Second,
 	ExpectContinueTimeout: 1 * time.Second,
 	ForceAttemptHTTP2:     true,
@@ -61,15 +61,15 @@ func (s *Shield) getTransport() *http.Transport {
 		pCfg := s.cfg.Proxy
 		maxIdle := pCfg.MaxIdleConns
 		if maxIdle <= 0 {
-			maxIdle = 20000
+			maxIdle = 1000
 		}
 		maxIdleHost := pCfg.MaxIdleConnsPerHost
 		if maxIdleHost <= 0 {
-			maxIdleHost = 5000
+			maxIdleHost = 200
 		}
 		idleTimeout := pCfg.IdleConnTimeout
 		if idleTimeout <= 0 {
-			idleTimeout = 90 * time.Second
+			idleTimeout = 30 * time.Second
 		}
 		respTimeout := pCfg.ResponseTimeout
 		if respTimeout <= 0 {
