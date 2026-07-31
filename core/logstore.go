@@ -34,10 +34,10 @@ var logGeoOnce sync.Once
 
 func getLogGeoProvider() *intelligence.GeoProvider {
 	logGeoOnce.Do(func() {
-		dbPath := "GeoLite2-City.mmdb"
+		dbPath := "assets/GeoLite2-City.mmdb"
 		if _, err := os.Stat(dbPath); err != nil {
-			if _, err2 := os.Stat("../GeoLite2-City.mmdb"); err2 == nil {
-				dbPath = "../GeoLite2-City.mmdb"
+			if _, err2 := os.Stat("../assets/GeoLite2-City.mmdb"); err2 == nil {
+				dbPath = "../assets/GeoLite2-City.mmdb"
 			}
 		}
 		p, err := intelligence.NewGeoProvider(dbPath)

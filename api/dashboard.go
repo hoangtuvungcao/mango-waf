@@ -2182,9 +2182,9 @@ func getClientIP(r *http.Request) string {
 }
 
 func (d *Dashboard) handleLogoMango(w http.ResponseWriter, r *http.Request) {
-	if _, err := os.Stat("logo-mango.png"); err == nil {
+	if _, err := os.Stat("assets/logo-mango.png"); err == nil {
 		w.Header().Set("Content-Type", "image/png")
-		http.ServeFile(w, r, "logo-mango.png")
+		http.ServeFile(w, r, "assets/logo-mango.png")
 		return
 	}
 	if _, err := os.Stat("../logo-mango.png"); err == nil {
@@ -2198,9 +2198,9 @@ func (d *Dashboard) handleLogoMango(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Dashboard) handleLogoMangoSmall(w http.ResponseWriter, r *http.Request) {
-	if _, err := os.Stat("logo-mango-small.png"); err == nil {
+	if _, err := os.Stat("assets/logo-mango-small.png"); err == nil {
 		w.Header().Set("Content-Type", "image/png")
-		http.ServeFile(w, r, "logo-mango-small.png")
+		http.ServeFile(w, r, "assets/logo-mango-small.png")
 		return
 	}
 	if _, err := os.Stat("../logo-mango-small.png"); err == nil {
@@ -2284,8 +2284,8 @@ func (d *Dashboard) handleWorldSVG(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=86400") // cache for 1 day
 
 	// Serve local world.svg if exists
-	if _, err := os.Stat("world.svg"); err == nil {
-		http.ServeFile(w, r, "world.svg")
+	if _, err := os.Stat("assets/world.svg"); err == nil {
+		http.ServeFile(w, r, "assets/world.svg")
 		return
 	}
 	if _, err := os.Stat("../world.svg"); err == nil {

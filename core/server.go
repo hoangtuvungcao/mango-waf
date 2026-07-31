@@ -111,8 +111,9 @@ type Stats struct {
 
 // DomainCounter is a cache-line padded counter for high-throughput tracking
 type DomainCounter struct {
-	Reqs int64
-	_    [56]byte
+	Reqs        int64
+	ActiveConns int64
+	_           [48]byte
 }
 
 // New creates a new Shield instance
@@ -627,7 +628,19 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			v, _ = s.domainReqs.LoadOrStore(hostDomain, &DomainCounter{})
 		}
-		atomic.AddInt64(&v.(*DomainCounter).Reqs, 1)
+		dc := v.(*DomainCounter)
+		atomic.AddInt64(&dc.Reqs, 1)
+
+		// Limit maximum concurrent active connections per domain to prevent FD exhaustion and WAF crash
+		active := atomic.AddInt64(&dc.ActiveConns, 1)
+		defer atomic.AddInt64(&dc.ActiveConns, -1)
+		
+		if active > 5000 {
+			w.Header().Set("X-Mango-Shield", "overload")
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, "503 Service Unavailable - Target Overloaded", http.StatusServiceUnavailable)
+			return
+		}
 	}
 
 	// Extract client IP
@@ -637,15 +650,15 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/logo-mango.png" || r.URL.Path == "/logo-mango-small.png" || r.URL.Path == "/assets/logo-mango.png" || r.URL.Path == "/favicon.ico" || r.URL.Path == "/apple-touch-icon.png" {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		if r.URL.Path == "/logo-mango-small.png" {
-			if _, err := os.Stat("logo-mango-small.png"); err == nil {
+			if _, err := os.Stat("assets/logo-mango-small.png"); err == nil {
 				w.Header().Set("Content-Type", "image/png")
-				http.ServeFile(w, r, "logo-mango-small.png")
+				http.ServeFile(w, r, "assets/logo-mango-small.png")
 				return
 			}
 		}
-		if _, err := os.Stat("logo-mango.png"); err == nil {
+		if _, err := os.Stat("assets/logo-mango.png"); err == nil {
 			w.Header().Set("Content-Type", "image/png")
-			http.ServeFile(w, r, "logo-mango.png")
+			http.ServeFile(w, r, "assets/logo-mango.png")
 			return
 		}
 		// Vector SVG fallback guaranteed never 404
