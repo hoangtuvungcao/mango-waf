@@ -1,4 +1,4 @@
-# Hướng Dẫn Cài Đặt & Cấu Hình Mango Shield Enterprise
+# Hướng Dẫn Cài Đặt & Cấu Hình Mango Shield Enterprise v3.0
 
 Tài liệu này hướng dẫn chi tiết cách cài đặt, cấu hình, biên dịch, và thiết lập WAF cùng hệ thống bảo vệ eBPF/XDP chống DDoS.
 
@@ -36,10 +36,10 @@ sudo chmod +x scripts/optimize_tcp.sh
 
 # 4. Kiểm tra cấu hình (Lá cờ -test)
 # Lệnh này kiểm tra xem config.yaml có bị sai cú pháp (như thiếu dấu space/tab) không.
-sudo ./mango-shield -config config/config.yaml -test
+sudo ./mango-shield -config config/production.yaml -test
 
 # 5. Chạy WAF trực tiếp trên Terminal
-sudo ./mango-shield -config config/config.yaml
+sudo ./mango-shield -config config/production.yaml
 ```
 
 ---
@@ -123,7 +123,7 @@ sudo cp bin/mango-shield.service /etc/systemd/system/
 Nếu bạn muốn tự tạo file Service thì tạo file `sudo nano /etc/systemd/system/mango-waf.service`:
 ```ini
 [Unit]
-Description=Mango Shield Enterprise WAF
+Description=Mango Shield Enterprise WAF v3.0
 After=network.target
 
 [Service]
@@ -133,11 +133,14 @@ WorkingDirectory=/opt/mango-waf
 ExecStart=/opt/mango-waf/mango-shield -config /opt/mango-waf/config/production.yaml
 Restart=always
 RestartSec=5
+
+# Tuning cực mạnh cho 200,000+ Kết Nối (OS Level)
 LimitNOFILE=1048576
+LimitNPROC=65535
 
 # Cấp quyền tối đa cho eBPF/XDP
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW CAP_PERFMON CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW CAP_PERFMON CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
