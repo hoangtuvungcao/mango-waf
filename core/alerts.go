@@ -141,11 +141,6 @@ func (a *AlertManager) SendDomainAttackStart(domain string, totalRPS, totalConns
 	// Reset cooldown for attack_end so the end alert always triggers
 	a.ClearCooldown("attack_end_" + domain)
 
-	if domain != "General System" {
-		domainAttackActiveMu.Lock()
-		activeAttackDomain = domain
-		domainAttackActiveMu.Unlock()
-	}
 
 	clusterSize := 1
 	if m := cluster.GetMesh(); m != nil {
@@ -157,16 +152,9 @@ func (a *AlertManager) SendDomainAttackStart(domain string, totalRPS, totalConns
 		triggerReason = "L7 Connection Load / Slowloris Flood"
 	}
 
-	var title, domainLine, stateLine string
-	if domain == "System" || domain == "General System" {
-		title = "🚨 CẢNH BÁO TẤN CÔNG DDoS TOÀN HỆ THỐNG"
-		domainLine = "🎯 Mục tiêu: Toàn bộ máy chủ (Global)"
-		stateLine = "🔴 Trạng thái: UNDER ATTACK (Bảo vệ toàn cầu)"
-	} else {
-		title = "🚨 CẢNH BÁO TẤN CÔNG DDoS TÊN MIỀN"
-		domainLine = fmt.Sprintf("🎯 Tên miền bị tấn công: <code>%s</code>", domain)
-		stateLine = fmt.Sprintf("🔴 Trạng thái: UNDER ATTACK (Chế độ tự động bật cho domain %s)", domain)
-	}
+	title := "🚨 CẢNH BÁO TẤN CÔNG DDoS TÊN MIỀN"
+	domainLine := fmt.Sprintf("🎯 Tên miền bị tấn công: <code>%s</code>", domain)
+	stateLine := fmt.Sprintf("🔴 Trạng thái: UNDER ATTACK (Chế độ tự động bật cho domain %s)", domain)
 
 	telegramHTML := fmt.Sprintf(
 		"<b>%s</b>\n"+
@@ -189,14 +177,8 @@ func (a *AlertManager) SendDomainAttackStart(domain string, totalRPS, totalConns
 		stateLine,
 	)
 
-	var discordTitle, discordDesc string
-	if domain == "System" || domain == "General System" {
-		discordTitle = "🚨 CẢNH BÁO TẤN CÔNG DDoS TOÀN HỆ THỐNG"
-		discordDesc = fmt.Sprintf("Phát hiện tấn công DDoS trên **Toàn bộ máy chủ** (Tổng Cluster: **%d req/s**)", totalRPS)
-	} else {
-		discordTitle = "🚨 CẢNH BÁO TẤN CÔNG DDoS DOMAIN"
-		discordDesc = fmt.Sprintf("Phát hiện tấn công DDoS trên tên miền **%s** (Tổng Cluster: **%d req/s**)", domain, totalRPS)
-	}
+	discordTitle := "🚨 CẢNH BÁO TẤN CÔNG DDoS DOMAIN"
+	discordDesc := fmt.Sprintf("Phát hiện tấn công DDoS trên tên miền **%s** (Tổng Cluster: **%d req/s**)", domain, totalRPS)
 
 	discordEmbed := DiscordEmbed{
 		Title:       discordTitle,
@@ -217,11 +199,7 @@ func (a *AlertManager) SendDomainAttackStart(domain string, totalRPS, totalConns
 	a.sendAllRich(telegramHTML, discordEmbed)
 }
 
-var (
-	activeAttackDomain   string
-	lastDomainAttackTime time.Time
-	domainAttackActiveMu sync.RWMutex
-)
+
 
 // SendDomainAttackEnd sends attack end notification for a specific target domain
 func (a *AlertManager) SendDomainAttackEnd(domain string, duration time.Duration, blocked int64) {
@@ -238,28 +216,14 @@ func (a *AlertManager) SendDomainAttackEnd(domain string, duration time.Duration
 		return
 	}
 
-	if domain != "General System" {
-		domainAttackActiveMu.Lock()
-		activeAttackDomain = ""
-		lastDomainAttackTime = time.Now()
-		domainAttackActiveMu.Unlock()
-	}
-
 	// Reset cooldown for attack_start so the NEXT attack triggers an alert immediately
 	a.ClearCooldown("attack_start_" + domain)
 
 	durStr := formatDuration(duration)
 
-	var title, domainLine, stateLine string
-	if domain == "System" || domain == "General System" {
-		title = "✅ TẤN CÔNG TOÀN HỆ THỐNG ĐÃ KẾT THÚC"
-		domainLine = "🎯 Mục tiêu: Toàn bộ máy chủ (Global)"
-		stateLine = "🍀 Trạng thái: STABLE (Hệ thống trở lại bình thường)"
-	} else {
-		title = "✅ TẤN CÔNG ĐÃ KẾT THÚC"
-		domainLine = fmt.Sprintf("🎯 Tên miền: <code>%s</code>", domain)
-		stateLine = fmt.Sprintf("🍀 Trạng thái: STABLE (Domain %s trở lại bình thường)", domain)
-	}
+	title := "✅ TẤN CÔNG ĐÃ KẾT THÚC"
+	domainLine := fmt.Sprintf("🎯 Tên miền: <code>%s</code>", domain)
+	stateLine := fmt.Sprintf("🍀 Trạng thái: STABLE (Domain %s trở lại bình thường)", domain)
 
 	telegramHTML := fmt.Sprintf(
 		"<b>%s</b>\n"+
@@ -273,14 +237,8 @@ func (a *AlertManager) SendDomainAttackEnd(domain string, duration time.Duration
 		title, domainLine, durStr, formatNumber(blocked), stateLine,
 	)
 
-	var discordTitle, discordDesc string
-	if domain == "System" || domain == "General System" {
-		discordTitle = "✅ TẤN CÔNG TOÀN HỆ THỐNG ĐÃ KẾT THÚC"
-		discordDesc = "Đã phòng thủ thành công trên **Toàn bộ máy chủ**"
-	} else {
-		discordTitle = "✅ TẤN CÔNG ĐÃ KẾT THÚC"
-		discordDesc = fmt.Sprintf("Đã phòng thủ thành công cho tên miền **%s**", domain)
-	}
+	discordTitle := "✅ TẤN CÔNG ĐÃ KẾT THÚC"
+	discordDesc := fmt.Sprintf("Đã phòng thủ thành công cho tên miền **%s**", domain)
 
 	discordEmbed := DiscordEmbed{
 		Title:       discordTitle,
@@ -297,36 +255,8 @@ func (a *AlertManager) SendDomainAttackEnd(domain string, duration time.Duration
 	a.sendAllRich(telegramHTML, discordEmbed)
 }
 
-// SendAttackStart sends beautiful attack start notification (suppressed if domain-specific alert active)
-func (a *AlertManager) SendAttackStart(rps, conns int64) {
-	domainAttackActiveMu.RLock()
-	activeDomain := activeAttackDomain
-	lastTime := lastDomainAttackTime
-	domainAttackActiveMu.RUnlock()
-
-	if activeDomain != "" || time.Since(lastTime) < 10*time.Minute {
-		return // Suppress duplicate "General System" notification when domain attack is active or recently finished
-	}
-	a.SendDomainAttackStart("General System", rps, conns)
-}
-
-// SendAttackEnd sends attack ended notification (suppressed if domain-specific alert active)
-func (a *AlertManager) SendAttackEnd(duration time.Duration, blocked int64) {
-	domainAttackActiveMu.RLock()
-	activeDomain := activeAttackDomain
-	lastTime := lastDomainAttackTime
-	domainAttackActiveMu.RUnlock()
-
-	if activeDomain != "" || time.Since(lastTime) < 10*time.Minute {
-		return // Suppress duplicate "General System" notification when domain attack is active or recently finished
-	}
-	a.SendDomainAttackEnd("General System", duration, blocked)
-}
-
-// SendBan sends IP ban notification (Disabled from Webhook to prevent spam during DDoS)
+// SendBan sends IP ban notification (Disabled to prevent bot lag)
 func (a *AlertManager) SendBan(ip, reason string, duration time.Duration) {
-	// Only log to console/file, don't spam Webhooks during heavy botnet attacks
-	// where thousands of IPs are banned per minute.
 	logger.Debug("IP Banned", "ip", ip, "reason", reason, "duration", duration)
 }
 

@@ -548,11 +548,6 @@ func (s *Shield) Stop() {
 	logger.Info("Mango Shield shutting down...")
 
 	// Flush any active attack end notifications before shutdown
-	if s.stats.IsUnderAttack {
-		duration := time.Since(s.stats.AttackStartTime)
-		blocked := atomic.LoadInt64(&s.stats.BlockedRequests)
-		s.pipeline.alerts.SendAttackEnd(duration, blocked)
-	}
 
 	s.domainUnderAttack.Range(func(key, value interface{}) bool {
 		if isUnder, ok := value.(bool); ok && isUnder {
@@ -1003,22 +998,17 @@ func (s *Shield) rpsCounter() {
 		}
 	}
 }
-
 // attackDetector monitors for attack conditions globally and per-domain
 func (s *Shield) attackDetector() {
 	defer s.wg.Done()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
-	var normalCount int
-
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
-			rps := atomic.LoadInt64(&s.stats.CurrentRPS)
-			conns := atomic.LoadInt64(&s.stats.ActiveConns)
 			thresholdRPS := int64(s.cfg.Protection.Emergency.RPSThreshold)
 			if thresholdRPS == 0 {
 				thresholdRPS = 200
@@ -1084,33 +1074,7 @@ func (s *Shield) attackDetector() {
 				}
 			}
 
-			// 2. System-wide Extreme Overload Trigger
-			thresholdConns := thresholdRPS * 5
-			if thresholdConns < 5000 {
-				thresholdConns = 5000 // Default at least 5000 conns for system-wide trigger
-			}
-			isSystemAttack := rps > thresholdRPS*2 || (conns > thresholdConns && rps > thresholdRPS/2)
 
-			if isSystemAttack {
-				normalCount = 0
-				if !s.stats.IsUnderAttack {
-					s.stats.IsUnderAttack = true
-					s.stats.AttackStartTime = time.Now()
-					atomic.AddInt64(&s.stats.AttacksDetected, 1)
-					logger.Warn("SYSTEM EXTREME ATTACK DETECTED", "rps", rps, "conns", conns)
-					s.pipeline.alerts.SendAttackStart(rps, conns)
-				}
-			} else if s.stats.IsUnderAttack {
-				normalCount++
-				if normalCount >= 10 {
-					s.stats.IsUnderAttack = false
-					duration := time.Since(s.stats.AttackStartTime)
-					blocked := atomic.LoadInt64(&s.stats.BlockedRequests)
-					logger.Info("System attack ended", "duration", duration.Round(time.Second), "blocked", blocked)
-					s.pipeline.alerts.SendAttackEnd(duration, blocked)
-					normalCount = 0
-				}
-			}
 		}
 	}
 }
