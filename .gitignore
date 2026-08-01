@@ -9,6 +9,7 @@ mango-shield
 mango-cli
 test-site/server_linux
 config/production.yaml
+config/production-nocf.yaml
 # Test binary, built with `go test -c`
 *.test
 
