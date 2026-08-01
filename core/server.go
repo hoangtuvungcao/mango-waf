@@ -20,10 +20,11 @@ import (
 	"mango-waf/logger"
 	"mango-waf/perf"
 	"mango-waf/rules"
-	"golang.org/x/net/netutil"
 	"math/big"
 	"net"
 	"net/http"
+
+	"golang.org/x/net/netutil"
 
 	"os"
 	"path/filepath"
@@ -271,7 +272,7 @@ func (s *Shield) ReloadConfig(newCfg *config.Config) {
 
 // Start starts the Mango Shield server
 func (s *Shield) Start() error {
-	logger.Info("Mango Shield v2.0 starting",
+	logger.Info("Mango Shield v3.0 starting",
 		"listen", s.cfg.Server.Listen,
 		"http_listen", s.cfg.Server.HTTPListen,
 		"domains", len(s.cfg.Domains),
@@ -540,7 +541,7 @@ func (s *Shield) SetFingerprintStore(store *fingerprint.FingerprintStore) {
 // Stop gracefully stops the server
 func (s *Shield) Stop() {
 	logger.Info("Mango Shield shutting down...")
-	
+
 	// Flush any active attack end notifications before shutdown
 	if s.stats.IsUnderAttack {
 		duration := time.Since(s.stats.AttackStartTime)
@@ -768,7 +769,7 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 			s.proxyRequest(w, r)
 		} else {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("Mango Shield v2.0 Active"))
+			w.Write([]byte("Mango Shield v3.0 Active"))
 		}
 		return
 	}
@@ -817,7 +818,7 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 			s.proxyRequest(w, r)
 		} else {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("Mango Shield v2.0 Active (No Upstream Configured)"))
+			w.Write([]byte("Mango Shield v3.0 Active (No Upstream Configured)"))
 		}
 
 	case ActionChallenge:
@@ -861,21 +862,21 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("X-Mango-Shield", "blocked")
-			
+
 			if action.Type == ActionRateLimit {
 				w.WriteHeader(http.StatusTooManyRequests)
 				fmt.Fprintf(w,
-	"<html><body style='background:#111;color:#ff9800;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
-		"<h1>429 Too Many Requests</h1><p>You have been rate limited by Mango Shield.</p>"+
-		"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
-	action.Reason, ip)
+					"<html><body style='background:#111;color:#ff9800;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
+						"<h1>429 Too Many Requests</h1><p>You have been rate limited by Mango Shield.</p>"+
+						"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
+					action.Reason, ip)
 			} else {
 				w.WriteHeader(http.StatusForbidden)
 				fmt.Fprintf(w,
-	"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
-		"<h1>403 Forbidden</h1><p>Access blocked by Mango Shield protection system.</p>"+
-		"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
-	action.Reason, ip)
+					"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
+						"<h1>403 Forbidden</h1><p>Access blocked by Mango Shield protection system.</p>"+
+						"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
+					action.Reason, ip)
 			}
 		}
 	}
@@ -1139,7 +1140,6 @@ func (s *Shield) extractIP(r *http.Request) string {
 	return peerHost
 }
 
-
 func splitFirst(s, sep string) string {
 	for i := 0; i < len(s); i++ {
 		if s[i] == sep[0] {
@@ -1164,7 +1164,7 @@ func printBanner(cfg *config.Config) {
 	banner := `
   ╔══════════════════════════════════════════╗
   ║                                          ║
-  ║   🥭  M A N G O   S H I E L D   v2.0     ║
+  ║   🥭  M A N G O   S H I E L D   v3.0     ║
   ║       Anti-DDoS L7 Protection            ║
   ║                                          ║
   ╚══════════════════════════════════════════╝`

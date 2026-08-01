@@ -1,5 +1,5 @@
 # ==============================================================================
-# MANGO SHIELD WAF v2.0 — Enterprise Production Configuration
+# MANGO SHIELD WAF v3.0 — Enterprise Production Configuration
 # Target Domain: firewall.hidev.dev (Cloudflare SSL Full Proxy)
 # Architecture: eBPF/XDP Kernel Filter + Go L7 Reverse Proxy Engine
 # ==============================================================================
@@ -756,3 +756,25 @@ xdp:
   # Performance Impact: Attaches XDP filter to network interface.
   # Security Impact: Drops packets at NIC layer before kernel allocation.
   auto_attach: true
+
+# ------------------------------------------------------------------------------
+# CLOUDFLARE EDGE BANNING INTEGRATION
+# Synchronize banned IPs to Cloudflare API (Account or Zone level)
+# ------------------------------------------------------------------------------
+cloudflare:
+  # Purpose: Enable syncing banned IPs to Cloudflare WAF.
+  enabled: false
+
+  # Purpose: Cloudflare API Token (Requires Firewall:Edit permissions)
+  api_token: "YOUR_CLOUDFLARE_API_TOKEN"
+
+  # Purpose: Account ID (Blocks IP across ALL domains in your account)
+  # NOTE: Leave empty ("") if you only want to block per-zone.
+  account_id: "YOUR_CLOUDFLARE_ACCOUNT_ID"
+
+  # Purpose: Zone IDs (Blocks IP for specific domains)
+  # Map your domains to their specific Cloudflare Zone IDs.
+  # NOTE: If account_id has a value, this zones section is ignored.
+  zones:
+    # "firewall.hidev.dev": "YOUR_ZONE_ID_HERE"
+    # "shop.trong.com": "ANOTHER_ZONE_ID_HERE"

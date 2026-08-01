@@ -32,6 +32,14 @@ type Config struct {
 	Cluster      ClusterConfig     `yaml:"cluster"`
 	XDP          XDPConfig         `yaml:"xdp"`
 	HTTP3        HTTP3Config       `yaml:"http3"`
+	Cloudflare   CloudflareConfig  `yaml:"cloudflare"`
+}
+
+type CloudflareConfig struct {
+	Enabled   bool              `yaml:"enabled"`
+	APIToken  string            `yaml:"api_token"`
+	AccountID string            `yaml:"account_id"`
+	Zones     map[string]string `yaml:"zones"` // Map of Domain to ZoneID
 }
 
 type HTTP3Config struct {

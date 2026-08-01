@@ -1,7 +1,7 @@
 package api
 
 // ============================================================================
-// MANGO SHIELD WAF v2.0 — FULL MANAGEMENT PLATFORM SPA
+// MANGO SHIELD WAF v3.0 — FULL MANAGEMENT PLATFORM SPA
 // Landing Page + Auth + Dashboard + Domain/SSL/Node/Traffic Management
 // Cyberpunk Dark Enterprise Design System
 // ============================================================================
@@ -575,7 +575,7 @@ a:hover{color:var(--accent)}
     <div class="hero-content animate-in">
       <div class="hero-badge">
         <span class="badge-dot"></span>
-        MANGO SHIELD ENTERPRISE WAF v2.0
+        MANGO SHIELD ENTERPRISE WAF v3.0
       </div>
       <h1 class="hero-title">
         Next-Gen Firewall &amp; <br>
@@ -825,7 +825,7 @@ a:hover{color:var(--accent)}
           <path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad3)"/>
         </svg>
         <span class="logo-text">Mango <span class="text-accent">Shield</span></span>
-        <span class="version">v2.0</span>
+        <span class="version">v3.0</span>
       </div>
       <nav class="sidebar-nav">
         <div class="nav-section">

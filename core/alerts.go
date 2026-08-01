@@ -196,7 +196,7 @@ var (
 // SendDomainAttackEnd sends attack end notification for a specific target domain
 func (a *AlertManager) SendDomainAttackEnd(domain string, duration time.Duration, blocked int64) {
 	logger.Info("AlertManager executing SendDomainAttackEnd", "domain", domain, "blocked", blocked, "duration", duration)
-	
+
 	// Only the designated cluster leader sends external notifications to prevent duplication
 	if m := cluster.GetMesh(); m != nil && !m.IsLeader() {
 		logger.Debug("AlertManager dropped SendDomainAttackEnd: not cluster leader")
@@ -357,7 +357,7 @@ func (a *AlertManager) SendCustom(msg string) {
 		Title:       "ℹ️ Thông báo",
 		Description: msg,
 		Color:       0x6B7AFF,
-		Footer:      DiscordFooter{Text: "🥭 Mango Shield v2.0"},
+		Footer:      DiscordFooter{Text: "🥭 Mango Shield v3.0"},
 	}
 	a.sendAllRich(telegramHTML, discordEmbed)
 }
@@ -474,7 +474,7 @@ func (a *AlertManager) sendDiscord(embed DiscordEmbed) {
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
 		logger.Error("Discord API Error", "status", resp.StatusCode, "body", string(b))

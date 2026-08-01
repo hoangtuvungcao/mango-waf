@@ -31,6 +31,7 @@ var (
 
 func main() {
 	configPath := flag.String("config", "config/default.yaml", "Đường dẫn file cấu hình")
+	testConfig := flag.Bool("test", false, "Kiểm tra cú pháp file cấu hình rồi thoát")
 	showVersion := flag.Bool("version", false, "Hiển thị phiên bản")
 	showHelp := flag.Bool("help", false, "Hiển thị trợ giúp")
 	flag.Parse()
@@ -54,6 +55,13 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[LỖI] Không thể tải cấu hình: %v\n", err)
 		os.Exit(1)
 	}
+
+	if *testConfig {
+		fmt.Printf("  ✓ Cú pháp cấu hình chuẩn xác (Syntax OK): %s\n", *configPath)
+		fmt.Printf("  ✓ Test thành công. WAF sẵn sàng khởi chạy.\n")
+		os.Exit(0)
+	}
+
 	fmt.Printf("  ✓ Cấu hình đã tải: %s\n", *configPath)
 
 	// Merge persistent dynamic domains from storage without randomizing domain order
@@ -142,6 +150,14 @@ func main() {
 		logger.Warn("Failed to initialize CDN", "error", err)
 	} else if cfg.CDN.Enabled {
 		fmt.Println("  ✓ CDN Caching Engine enabled (Ristretto)")
+	}
+
+	// === 9.5 Initialize Cloudflare Edge Banning Worker ===
+	core.InitCloudflareManager()
+	go core.CFManager.RunWorker()
+	core.CFManager.StartAutoCleanup(cfg.Protection.Ban.Duration)
+	if cfg.Cloudflare.Enabled {
+		fmt.Println("  ✓ Cloudflare API Integration enabled (Background Sync)")
 	}
 
 	// === 10. Create Shield Server & Wire All Engines ===
@@ -349,7 +365,7 @@ func main() {
 	}()
 
 	// === 13. Start Server ===
-	fmt.Println("\n🥭 Mango Shield v2.0 — Đang bảo vệ!")
+	fmt.Println("\n🥭 Mango Shield v3.0 — Đang bảo vệ!")
 	fmt.Printf("   HTTPS: %s | HTTP: %s\n", cfg.Server.Listen, cfg.Server.HTTPListen)
 	fmt.Println("   Nhấn Ctrl+C để dừng, gửi SIGHUP để tải lại cấu hình")
 
@@ -361,7 +377,7 @@ func main() {
 func printBanner() {
 	fmt.Println(`
   ╔══════════════════════════════════════╗
-  ║         🥭 MANGO SHIELD v2.0         ║
+  ║         🥭 MANGO SHIELD v3.0         ║
   ║       L7 DDoS Protection & WAF       ║
   ║      github.com/hoangtuvungcao       ║
   ╚══════════════════════════════════════╝`)

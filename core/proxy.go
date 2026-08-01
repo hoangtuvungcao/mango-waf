@@ -245,7 +245,7 @@ func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	} else {
 		r.Header.Set("X-Forwarded-For", clientIP)
 	}
-	r.Header.Set("X-Mango-Shield", "v2.0")
+	r.Header.Set("X-Mango-Shield", "v3.0")
 
 	proxy.ServeHTTP(w, r)
 }

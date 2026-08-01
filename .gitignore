@@ -7,12 +7,13 @@
 bin/
 mango-shield
 mango-cli
-test-site/server_linux
+# test-site/server_linux
 config/production.yaml
 config/production-nocf.yaml
+mango-shield-linux-amd64.tar.gz
 # Test binary, built with `go test -c`
 *.test
-
+.agent
 # Output of the go coverage tool, specifically when used with Litmus
 *.out
 

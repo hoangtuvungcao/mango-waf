@@ -989,6 +989,15 @@ func (p *Pipeline) banIP(ip string, duration time.Duration) {
 	default:
 		logger.Warn("Ban queue full, dropping OS ban request", "ip", ip)
 	}
+
+	// Push to Cloudflare Worker queue
+	if CFManager != nil {
+		select {
+		case CFManager.BanQueue <- CloudflareBanRequest{IP: ip}:
+		default:
+			logger.Warn("Cloudflare ban queue full, dropping sync request", "ip", ip)
+		}
+	}
 }
 
 // WhitelistIP whitelists an IP for a duration

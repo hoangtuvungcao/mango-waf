@@ -814,7 +814,7 @@ body {
     <a class="nav-brand" href="javascript:void(0)">
       <svg width="28" height="28" viewBox="0 0 100 100" style="flex-shrink:0"><defs><linearGradient id="tsMGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient><linearGradient id="tsLGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#tsMGrad)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#tsLGrad)"/></svg>
       <span>MANGO SHIELD</span>
-      <span class="nav-ver">v2.0</span>
+      <span class="nav-ver">v3.0</span>
     </a>
     <div class="nav-tabs" id="navTabs">
       <button class="nav-tab active" data-tab="home" onclick="switchTab('home')">Home</button>
@@ -923,7 +923,7 @@ body {
 
 </main>
 
-<footer class="footer">Mango Shield v2.0 -- Enterprise L7 DDoS Protection and WAF Engine -- Built with Go and eBPF</footer>
+<footer class="footer">Mango Shield v3.0 -- Enterprise L7 DDoS Protection and WAF Engine -- Built with Go and eBPF</footer>
 
 <script>
 // ======================== DATA STATE ========================

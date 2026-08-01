@@ -4,22 +4,42 @@ Tài liệu này hướng dẫn chi tiết cách cài đặt, cấu hình, biên
 
 ---
 
-## 1. Sử Dụng Bản Build Sẵn (Pre-built Binary)
+## 1. Sử Dụng Bản Build Sẵn (Pre-built Binary - Khuyên Dùng)
 
-Nếu bạn không muốn tự biên dịch, bạn có thể tải bản build sẵn (binary) về và chạy trực tiếp.
+Đây là cách cài đặt nhanh nhất để chạy WAF mà không cần biên dịch hay cài đặt môi trường Go. Bản build sẵn này được đóng gói tối giản nhất để triển khai lên máy chủ Production.
+
+### 📦 Thành phần bên trong file nén (Release Archive):
+Khi giải nén file `mango-shield-linux-amd64.tar.gz` (hoặc copy từ thư mục `bin/`), bạn sẽ nhận được các file sau:
+- **`mango-shield`**: File thực thi (Binary) chính của WAF. Đã được biên dịch tĩnh, tốc độ siêu nhanh.
+- **`config/config.yaml`**: File cấu hình lõi. Nơi bạn điền danh sách IP/Domain và các thông số giới hạn.
+- **`xdp/mango_xdp.c`**: Mã nguồn hạt nhân C. WAF sẽ tự động đọc file này, biên dịch và nhúng xuống Card mạng để chặn DDoS ở tầng thấp nhất.
+- **`scripts/optimize_tcp.sh`**: Kịch bản tối ưu hóa TCP/Kernel Linux (chống SYN Flood, mở rộng băng thông).
+- **`mango-shield.service`**: File Systemd Service mẫu để cài WAF chạy ngầm tự động cùng hệ thống.
+- **`README.md`**: Hướng dẫn cài đặt nhanh rút gọn.
+
+---
+
+### 🚀 Hướng Dẫn Cài Đặt Từng Bước
 
 ```bash
-# 1. Tải bản binary mới nhất
+# 1. Tải bản binary mới nhất (hoặc copy từ thư mục bin/ sang)
 wget https://github.com/hoangtuvungcao/mango-waf/releases/latest/download/mango-shield-linux-amd64.tar.gz
 
-# 2. Giải nén
-tar -xzvf mango-shield-linux-amd64.tar.gz
+# 2. Giải nén vào thư mục chuẩn
+sudo mkdir -p /opt/mango-waf
+sudo tar -xzvf mango-shield-linux-amd64.tar.gz -C /opt/mango-waf/
+cd /opt/mango-waf
 
-# 3. Cấp quyền thực thi
-chmod +x mango-shield
+# 3. Cấp quyền thực thi cho file chạy và kịch bản mạng
+sudo chmod +x mango-shield
+sudo chmod +x scripts/optimize_tcp.sh
 
-# 4. Chạy WAF
-sudo ./mango-shield
+# 4. Kiểm tra cấu hình (Lá cờ -test)
+# Lệnh này kiểm tra xem config.yaml có bị sai cú pháp (như thiếu dấu space/tab) không.
+sudo ./mango-shield -config config/config.yaml -test
+
+# 5. Chạy WAF trực tiếp trên Terminal
+sudo ./mango-shield -config config/config.yaml
 ```
 
 ---
@@ -46,11 +66,14 @@ go mod download
 go generate ./...
 
 # 4. Biên dịch mã nguồn Go ra Binary (Tối ưu hóa dung lượng & tốc độ)
-CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o mango-shield main.go
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o mango-shield main.go
 
-# 5. Cấp quyền và chạy thử
+# 5. Kiểm tra cấu hình trước khi chạy
 chmod +x mango-shield
-sudo ./mango-shield
+sudo ./mango-shield -config config/production.yaml -test
+
+# 6. Chạy thử
+sudo ./mango-shield -config config/production.yaml
 ```
 
 ---
@@ -92,12 +115,12 @@ WAF được thiết kế để kết luận một cuộc tấn công kết thú
 
 ## 5. Chạy WAF Ở Chế Độ Nền (Background / Systemd)
 
-Tạo file Service:
+Kích hoạt và chạy các tính năng mạnh nhất của Kernel cho eBPF:
 ```bash
-sudo nano /etc/systemd/system/mango-waf.service
+sudo cp bin/mango-shield.service /etc/systemd/system/
 ```
 
-Thêm nội dung:
+Nếu bạn muốn tự tạo file Service thì tạo file `sudo nano /etc/systemd/system/mango-waf.service`:
 ```ini
 [Unit]
 Description=Mango Shield Enterprise WAF
@@ -107,10 +130,14 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/mango-waf
-ExecStart=/opt/mango-waf/mango-shield
-Restart=on-failure
+ExecStart=/opt/mango-waf/mango-shield -config /opt/mango-waf/config/production.yaml
+Restart=always
 RestartSec=5
 LimitNOFILE=1048576
+
+# Cấp quyền tối đa cho eBPF/XDP
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target

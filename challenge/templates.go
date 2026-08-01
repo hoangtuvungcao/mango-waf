@@ -76,7 +76,7 @@ body {
       <img src="/logo-mango-small.png" alt="Mango Shield" style="width:32px;height:32px;object-fit:contain">
       <div class="brand-name">MANGO SHIELD</div>
     </div>
-    <div class="badge">WAF v2.0</div>
+    <div class="badge">WAF v3.0</div>
   </div>
   <div class="title">Checking Connection Integrity</div>
   <div class="desc">Please wait while Mango Shield validates your browser session before granting access to <strong>%s</strong>.</div>
@@ -233,7 +233,7 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
       <img src="/logo-mango-small.png" alt="Mango Shield" style="width:28px;height:28px;object-fit:contain">
       <div class="brand-name">MANGO SHIELD</div>
     </div>
-    <div class="badge">WAF v2.0</div>
+    <div class="badge">WAF v3.0</div>
   </div>
   <div class="title">Human Verification</div>
   <div class="desc">Press and hold the button below for 1.5 seconds to confirm you are a human visitor to <strong>%s</strong>.</div>
@@ -415,7 +415,7 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
     <div><div class="meta-label">Ray ID</div><div class="meta-val">%s</div></div>
   </div>
 
-  <div class="footer">Rate Limiting & DDoS Shield by Mango Shield v2.0</div>
+  <div class="footer">Rate Limiting & DDoS Shield by Mango Shield v3.0</div>
 </div>
 <script>
   var secs = %d;
@@ -488,7 +488,7 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
     <div><div class="meta-label">Ray ID</div><div class="meta-val">%s</div></div>
   </div>
 
-  <div class="footer">Security Policy Enforced by Mango Shield v2.0</div>
+  <div class="footer">Security Policy Enforced by Mango Shield v3.0</div>
 </div>
 </body>
 </html>`
