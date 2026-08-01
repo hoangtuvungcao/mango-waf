@@ -91,8 +91,8 @@ func TestServeRateLimitPage(t *testing.T) {
 
 	mgr.ServeRateLimitPage(rec, req, "198.51.100.42", 10)
 
-	if rec.Code != 403 {
-		t.Errorf("expected status code 403 Forbidden, got %d", rec.Code)
+	if rec.Code != 429 {
+		t.Errorf("expected status code 429 Too Many Requests, got %d", rec.Code)
 	}
 
 	if rec.Header().Get("Retry-After") != "10" {
