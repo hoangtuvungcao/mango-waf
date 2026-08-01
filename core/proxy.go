@@ -149,6 +149,7 @@ func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		proxy = httputil.NewSingleHostReverseProxy(target)
 		proxy.Transport = s.getTransport()
+		proxy.BufferPool = sharedProxyBufferPool
 
 		// Configure Director to forward Host headers and protocol
 		originalDirector := proxy.Director
@@ -257,6 +258,27 @@ func isWebSocket(r *http.Request) bool {
 var wsBufferPool = sync.Pool{
 	New: func() interface{} {
 		return make([]byte, 32*1024)
+	},
+}
+
+// bufferPool implements httputil.BufferPool
+type bufferPool struct {
+	pool sync.Pool
+}
+
+func (bp *bufferPool) Get() []byte {
+	return bp.pool.Get().([]byte)
+}
+
+func (bp *bufferPool) Put(b []byte) {
+	bp.pool.Put(b)
+}
+
+var sharedProxyBufferPool = &bufferPool{
+	pool: sync.Pool{
+		New: func() interface{} {
+			return make([]byte, 32*1024) // 32KB default reverse proxy buffer
+		},
 	},
 }
 

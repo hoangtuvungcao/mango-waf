@@ -11,8 +11,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"github.com/quic-go/quic-go/http3"
-	"golang.org/x/sys/unix"
 	"mango-waf/challenge"
 	"mango-waf/cluster"
 	"mango-waf/config"
@@ -22,9 +20,11 @@ import (
 	"mango-waf/logger"
 	"mango-waf/perf"
 	"mango-waf/rules"
+	"golang.org/x/net/netutil"
 	"math/big"
 	"net"
 	"net/http"
+
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +32,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/quic-go/quic-go/http3"
+	"golang.org/x/sys/unix"
 )
 
 // Shield is the main Mango Shield server
@@ -425,7 +428,7 @@ func (s *Shield) Start() error {
 		TLSConfig:         tlsConfig,
 		ReadTimeout:       s.cfg.Server.ReadTimeout,
 		WriteTimeout:      s.cfg.Server.WriteTimeout,
-		IdleTimeout:       30 * time.Second, // Aggressively drop idle connections to prevent socket exhaustion during DDoS
+		IdleTimeout:       s.cfg.Server.IdleTimeout, // Aggressively drop idle connections to prevent socket exhaustion during DDoS
 		ReadHeaderTimeout: 1500 * time.Millisecond,
 		MaxHeaderBytes:    s.cfg.Server.MaxHeaderBytes,
 		ConnState: func(conn net.Conn, state http.ConnState) {
@@ -482,6 +485,13 @@ func (s *Shield) Start() error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+
+	// NEW: Limit concurrent connections at the listener level to avoid Goroutine OOM
+	maxConns := s.cfg.Protection.ConnectionLimit.MaxTotal
+	if maxConns <= 0 {
+		maxConns = 50000 // default safe limit for large VPS
+	}
+	baseListener = netutil.LimitListener(baseListener, maxConns)
 
 	// Early Reject Layer: Sniff TLS ClientHello before full handshake
 	if s.cfg.TLS.Enabled {
@@ -629,6 +639,10 @@ func (s *Shield) GetDomainRPS(host string) int64 {
 func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if err := recover(); err != nil {
+			if err == http.ErrAbortHandler {
+				// Re-panic to let net/http silently close the connection
+				panic(err)
+			}
 			logger.Error("Panic recovered in HTTP request handler", "error", err, "uri", r.RequestURI)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
@@ -688,7 +702,6 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// We MUST buffer the body so r.ParseForm() doesn't consume it and break ReverseProxy for normal POSTs
 	if r.Method == "POST" && strings.Contains(r.Header.Get("Content-Type"), "application/x-www-form-urlencoded") {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 1024*1024)) // 1MB limit for forms
-		r.Body.Close()
 		r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 		if err := r.ParseForm(); err == nil && r.FormValue("challenge_type") != "" {
@@ -697,8 +710,11 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 			if s.challMgr.HandleVerification(w, r, ip) {
 				GetLogStore().RecordEvent("CHALLENGE", ip, r.Host, r.Method, r.URL.Path, http.StatusOK, "CHALLENGE_SOLVED", "PoW/Turnstile", "Browser security challenge solved successfully")
-				// Redirect cleanly back to the same page using StatusSeeOther (HTTP 303)
-				http.Redirect(w, r, r.URL.RequestURI(), http.StatusSeeOther)
+				redirectPath := r.URL.Path
+				if redirectPath == "" {
+					redirectPath = "/"
+				}
+				http.Redirect(w, r, redirectPath, http.StatusFound)
 				return
 			}
 		} else {
@@ -823,8 +839,17 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 				s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
 			}
 		}
-		// Fast-path for high RPS attack surges (>100 RPS) to prevent CPU & rendering bottlenecks
-		if s.stats.IsUnderAttack || atomic.LoadInt64(&s.stats.CurrentRPS) > 100 {
+		// Fast-path for high RPS attack surges to prevent CPU & rendering bottlenecks
+		fastPathThreshold := int64(s.cfg.Protection.Emergency.RPSThreshold * 2)
+		if fastPathThreshold <= 0 {
+			fastPathThreshold = 100
+		}
+		if s.stats.IsUnderAttack || atomic.LoadInt64(&s.stats.CurrentRPS) > fastPathThreshold {
+			if action.Type == ActionDrop {
+				// Instantly terminate the TCP connection without sending any HTTP response!
+				// This saves massive CPU, memory, and outbound bandwidth during a flood.
+				panic(http.ErrAbortHandler)
+			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 			w.Header().Set("X-Mango-Shield", "blocked")
 			w.WriteHeader(http.StatusForbidden)
@@ -836,13 +861,22 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("X-Mango-Shield", "blocked")
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(fmt.Sprintf(
-				"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
-					"<h1>403 Forbidden</h1><p>Access blocked by Mango Shield protection system.</p>"+
-					"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
-				action.Reason, ip,
-			)))
+			
+			if action.Type == ActionRateLimit {
+				w.WriteHeader(http.StatusTooManyRequests)
+				fmt.Fprintf(w,
+	"<html><body style='background:#111;color:#ff9800;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
+		"<h1>429 Too Many Requests</h1><p>You have been rate limited by Mango Shield.</p>"+
+		"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
+	action.Reason, ip)
+			} else {
+				w.WriteHeader(http.StatusForbidden)
+				fmt.Fprintf(w,
+	"<html><body style='background:#111;color:#f44;font-family:sans-serif;text-align:center;padding-top:100px;'>"+
+		"<h1>403 Forbidden</h1><p>Access blocked by Mango Shield protection system.</p>"+
+		"<p style='color:#666;font-size:12px;'>Reason: %s | IP: %s</p></body></html>",
+	action.Reason, ip)
+			}
 		}
 	}
 }

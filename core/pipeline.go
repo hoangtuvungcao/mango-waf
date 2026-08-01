@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -60,14 +61,20 @@ func init() {
 }
 
 // Pipeline is the request processing pipeline
+type BanRequest struct {
+	IP       string
+	Duration time.Duration
+}
+
 type Pipeline struct {
 	shield        *Shield
 	cfg           *config.Config
 	domainModeMap map[string]string // domain -> protection_mode (pre-lowercased keys)
 	validHostMap  map[string]bool   // pre-lowercased domain names for O(1) host validation
 	ipStates      *IPStateMap       // 256-shard high-concurrency map
-	banned        sync.Map          // map[string]time.Time
-	whitelist     sync.Map          // map[string]time.Time
+	banned        *ShardedTimeMap
+	whitelist     *ShardedTimeMap
+	banQueue      chan BanRequest
 	alerts        *AlertManager
 	intel         *intelligence.Intel
 	detEngine     *detection.Engine
@@ -109,7 +116,7 @@ const ipShardCount = 256
 
 type ipStateShard struct {
 	mu sync.RWMutex
-	m  map[string]*IPState
+	m  map[[16]byte]*IPState
 }
 
 type IPStateMap struct {
@@ -120,30 +127,53 @@ func newIPStateMap() *IPStateMap {
 	m := &IPStateMap{}
 	for i := 0; i < ipShardCount; i++ {
 		m.shards[i] = &ipStateShard{
-			m: make(map[string]*IPState, 2048),
+			m: make(map[[16]byte]*IPState, 2048),
 		}
 	}
 	return m
 }
 
-func fnv32IP(key string) uint32 {
+// parseIPFast converts an IP string to [16]byte with zero allocation for IPv4 and IPv6
+func parseIPFast(ipStr string) [16]byte {
+	addr, err := netip.ParseAddr(ipStr)
+	if err == nil {
+		return addr.As16()
+	}
+	return [16]byte{}
+}
+
+func fnv32IP(key [16]byte) uint32 {
 	hash := uint32(2166136261)
 	const prime32 = uint32(16777619)
-	for i := 0; i < len(key); i++ {
-		hash ^= uint32(key[i])
-		hash *= prime32
-	}
+	// unroll loop for 16 bytes for ultra speed
+	hash = (hash ^ uint32(key[0])) * prime32
+	hash = (hash ^ uint32(key[1])) * prime32
+	hash = (hash ^ uint32(key[2])) * prime32
+	hash = (hash ^ uint32(key[3])) * prime32
+	hash = (hash ^ uint32(key[4])) * prime32
+	hash = (hash ^ uint32(key[5])) * prime32
+	hash = (hash ^ uint32(key[6])) * prime32
+	hash = (hash ^ uint32(key[7])) * prime32
+	hash = (hash ^ uint32(key[8])) * prime32
+	hash = (hash ^ uint32(key[9])) * prime32
+	hash = (hash ^ uint32(key[10])) * prime32
+	hash = (hash ^ uint32(key[11])) * prime32
+	hash = (hash ^ uint32(key[12])) * prime32
+	hash = (hash ^ uint32(key[13])) * prime32
+	hash = (hash ^ uint32(key[14])) * prime32
+	hash = (hash ^ uint32(key[15])) * prime32
 	return hash
 }
 
-func (m *IPStateMap) getShard(ip string) *ipStateShard {
-	return m.shards[fnv32IP(ip)%ipShardCount]
+func (m *IPStateMap) getShard(key [16]byte) *ipStateShard {
+	return m.shards[fnv32IP(key)%ipShardCount]
 }
 
-func (m *IPStateMap) GetOrCreate(ip string, isTrusted bool, now time.Time) *IPState {
-	shard := m.getShard(ip)
+func (m *IPStateMap) GetOrCreate(ipStr string, isTrusted bool, now time.Time) *IPState {
+	ipKey := parseIPFast(ipStr)
+	shard := m.getShard(ipKey)
 	shard.mu.RLock()
-	state, ok := shard.m[ip]
+	state, ok := shard.m[ipKey]
 	shard.mu.RUnlock()
 
 	if ok {
@@ -153,30 +183,36 @@ func (m *IPStateMap) GetOrCreate(ip string, isTrusted bool, now time.Time) *IPSt
 
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
-	if state, ok = shard.m[ip]; ok {
+	if state, ok = shard.m[ipKey]; ok {
 		atomic.StoreInt64(&state.LastSeen, now.UnixNano())
 		return state
 	}
 
 	state = &IPState{
-		LastReset:      now,
 		FirstSeen:      now,
 		LastSeen:       now.UnixNano(),
-		TrustScore:     50,
+		LastReset:      now,
 		IsTrustedProxy: isTrusted,
 	}
-	shard.m[ip] = state
+	if isTrusted {
+		state.TrustScore = 100.0 // Trusted proxies/networks get max trust initially
+	} else {
+		state.TrustScore = 50.0 // Default trust score
+	}
+	shard.m[ipKey] = state
 	return state
 }
 
-func (m *IPStateMap) Cleanup(now time.Time, ttl time.Duration) {
-	for i := 0; i < ipShardCount; i++ {
-		shard := m.shards[i]
+func (m *IPStateMap) Cleanup(idleTimeout time.Duration) {
+	now := time.Now().UnixNano()
+	idleNanos := idleTimeout.Nanoseconds()
+
+	for _, shard := range m.shards {
 		shard.mu.Lock()
-		for ip, state := range shard.m {
-			lastSeenNs := atomic.LoadInt64(&state.LastSeen)
-			if now.UnixNano()-lastSeenNs > int64(ttl) {
-				delete(shard.m, ip)
+		for ipKey, state := range shard.m {
+			lastSeen := atomic.LoadInt64(&state.LastSeen)
+			if now-lastSeen > idleNanos {
+				delete(shard.m, ipKey)
 			}
 		}
 		shard.mu.Unlock()
@@ -206,21 +242,25 @@ func NewPipeline(s *Shield) *Pipeline {
 		domainModeMap: domainModeMap,
 		validHostMap:  validHostMap,
 		ipStates:      newIPStateMap(),
+		banned:        NewShardedTimeMap(),
+		whitelist:     NewShardedTimeMap(),
+		banQueue:      make(chan BanRequest, 100000),
 		alerts:        NewAlertManager(s.cfg),
 		xdpMgr:        NewXDPManager(s.cfg),
 	}
+	go p.banWorkerLoop()
 	if mesh := cluster.GetMesh(); mesh != nil {
 		mesh.SetBanHandler(func(ip string, duration time.Duration) {
 			p.BanIPLocal(ip, duration)
 		})
 		mesh.SetUnbanHandler(func(ip string) {
 			if ip == "all" {
-				p.banned.Range(func(k, v interface{}) bool {
-					p.banned.Delete(k)
-					return true
-				})
+				snapshot := p.banned.Snapshot()
+				p.banned.Clear()
 				if p.xdpMgr != nil && p.xdpMgr.Enabled {
-					p.xdpMgr.UnbanIP("all")
+					for k := range snapshot {
+						p.xdpMgr.UnbanIP(k)
+					}
 				}
 			} else {
 				p.banned.Delete(ip)
@@ -270,8 +310,12 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 		if p.degrader == nil || !p.degrader.IsFeatureDisabled("waf_deep_inspect", p.shield.stats.CurrentRPS) {
 			wafResult := p.wafEngine.Inspect(r)
 			if wafResult.Blocked {
-				// Suppress heavy disk log I/O during high RPS attacks (>100 RPS)
-				if atomic.LoadInt64(&p.shield.stats.CurrentRPS) < 100 {
+				// Suppress heavy disk log I/O during high RPS attacks
+				logThreshold := int64(p.cfg.Protection.Emergency.RPSThreshold * 2)
+				if logThreshold <= 0 {
+					logThreshold = 100
+				}
+				if atomic.LoadInt64(&p.shield.stats.CurrentRPS) < logThreshold {
 					logger.Warn("WAF blocked malicious request", "ip", ip, "rule", wafResult.TopRule, "score", wafResult.Score, "uri", r.RequestURI)
 				}
 				// If under DDoS attack, push repeated WAF attackers directly to XDP eBPF NIC map
@@ -704,19 +748,21 @@ func (p *Pipeline) determineStageWithFP(state *IPState, ip string, r *http.Reque
 				}
 				return 0
 
-			default: // Low trust: Score < 30 (Bots / Suspicious)
-				if state.RPS > limit {
-					return 1 // Moderate RPS from suspicious source -> JS Challenge
+			default: // Low trust: Score < 30 (Bots / Suspicious / API Scripts)
+				if state.RPS > limit/2 {
+					return 2 // Fast surge from bot -> Captcha
 				}
-				return 0
+				// Even at 1 RPS, a suspicious bot should be JS challenged immediately
+				// to prevent massive distributed botnets from leaking 1 request per IP!
+				return 1
 			}
 		}
 
 		// Fallback (no fingerprinting available)
-		if state.RPS > limit*2 {
+		if state.RPS > limit {
 			return 2
 		}
-		if state.RPS > limit {
+		if state.RPS > limit/2 {
 			return 1
 		}
 		return 0 // Truly seamless for first-time visitors when system is healthy
@@ -786,7 +832,7 @@ func (p *Pipeline) isBanned(ip string) bool {
 	if !ok {
 		return false
 	}
-	expiry := v.(time.Time)
+	expiry := v
 	if time.Now().After(expiry) {
 		p.banned.Delete(ip)
 		return false
@@ -870,7 +916,7 @@ func (p *Pipeline) hasDynamicWhitelist(ip string) bool {
 	if !ok {
 		return false
 	}
-	expiry := v.(time.Time)
+	expiry := v
 	if time.Now().After(expiry) {
 		p.whitelist.Delete(ip)
 		return false
@@ -934,24 +980,14 @@ func (p *Pipeline) banIP(ip string, duration time.Duration) {
 		atomic.AddInt64(&p.shield.stats.BannedIPs, 1)
 	} else {
 		p.banned.Store(ip, time.Now().Add(duration))
+		return
 	}
-	logger.Info("IP banned", "ip", ip, "duration", duration)
+	logger.Debug("IP banned", "ip", ip, "duration", duration) // Demoted to debug to save IO
 
-	// 1. Unbeatable Hardware-level Drop (XDP / eBPF) - Only for direct non-proxy IPs
-	if p.xdpMgr != nil && p.xdpMgr.Enabled && !p.isTrustedProxy(ip) {
-		if err := p.xdpMgr.BanIP(ip); err != nil {
-			logger.Warn("XDP Map insertion failed", "ip", ip, "err", err)
-		}
-	}
-
-	if p.cfg.Protection.Ban.UseIptables && !p.isTrustedProxy(ip) {
-		timeoutSec := int(duration.Seconds())
-		go func() {
-			cmd := exec.Command("ipset", "add", "mango_bans", ip, "timeout", fmt.Sprintf("%d", timeoutSec), "-exist")
-			if err := cmd.Run(); err != nil {
-				logger.Debug("IPSet ban skipped or failed", "ip", ip, "error", err)
-			}
-		}()
+	select {
+	case p.banQueue <- BanRequest{IP: ip, Duration: duration}:
+	default:
+		logger.Warn("Ban queue full, dropping OS ban request", "ip", ip)
 	}
 }
 
@@ -976,29 +1012,27 @@ func (p *Pipeline) UnbanIP(ip string) {
 func (p *Pipeline) GetBannedIPsList() []string {
 	now := time.Now()
 	var result []string
-	p.banned.Range(func(key, value interface{}) bool {
-		expiry := value.(time.Time)
+	snapshot := p.banned.Snapshot()
+	for key, expiry := range snapshot {
 		if now.Before(expiry) {
 			ttl := int64(expiry.Sub(now).Seconds())
-			result = append(result, fmt.Sprintf("%s|%s|%d", key.(string), expiry.Format("2006-01-02 15:04:05"), ttl))
+			result = append(result, fmt.Sprintf("%s|%s|%d", key, expiry.Format("2006-01-02 15:04:05"), ttl))
 		} else {
 			p.banned.Delete(key)
 		}
-		return true
-	})
+	}
 	return result
 }
 
 // UnbanAllIPs clears all banned IPs from memory and eBPF
 func (p *Pipeline) UnbanAllIPs() {
-	p.banned.Range(func(key, value interface{}) bool {
-		ipStr := key.(string)
-		p.banned.Delete(key)
-		if p.xdpMgr != nil && p.xdpMgr.Enabled {
-			p.xdpMgr.UnbanIP(ipStr)
+	snapshot := p.banned.Snapshot()
+	p.banned.Clear()
+	if p.xdpMgr != nil && p.xdpMgr.Enabled {
+		for key := range snapshot {
+			p.xdpMgr.UnbanIP(key)
 		}
-		return true
-	})
+	}
 	if mesh := cluster.GetMesh(); mesh != nil {
 		mesh.BroadcastUnban("all")
 	}
@@ -1009,25 +1043,19 @@ func (p *Pipeline) UnbanAllIPs() {
 // Cleanup removes expired entries
 func (p *Pipeline) Cleanup() {
 	now := time.Now()
-	p.banned.Range(func(key, value interface{}) bool {
-		if now.After(value.(time.Time)) {
-			ipStr := key.(string)
+	snapshot := p.banned.Snapshot()
+	for key, expiry := range snapshot {
+		if now.After(expiry) {
 			p.banned.Delete(key)
 			atomic.AddInt64(&p.shield.stats.BannedIPs, -1)
 			if p.xdpMgr != nil && p.xdpMgr.Enabled {
-				p.xdpMgr.UnbanIP(ipStr)
+				p.xdpMgr.UnbanIP(key)
 			}
 		}
-		return true
-	})
-	p.whitelist.Range(func(key, value interface{}) bool {
-		if now.After(value.(time.Time)) {
-			p.whitelist.Delete(key)
-		}
-		return true
-	})
+	}
+	p.whitelist.Cleanup(now)
 
-	p.ipStates.Cleanup(now, 10*time.Minute)
+	p.ipStates.Cleanup(10 * time.Minute)
 }
 
 func isStaticAsset(path string) bool {
@@ -1041,4 +1069,55 @@ func isStaticAsset(path string) bool {
 		return true
 	}
 	return path == "/favicon.ico"
+}
+
+func (p *Pipeline) banWorkerLoop() {
+	var batch []BanRequest
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case req := <-p.banQueue:
+			batch = append(batch, req)
+			if len(batch) >= 1000 {
+				p.flushBans(batch)
+				batch = batch[:0]
+			}
+		case <-ticker.C:
+			if len(batch) > 0 {
+				p.flushBans(batch)
+				batch = batch[:0]
+			}
+		}
+	}
+}
+
+func (p *Pipeline) flushBans(batch []BanRequest) {
+	for _, req := range batch {
+		if p.xdpMgr != nil && p.xdpMgr.Enabled && !p.isTrustedProxy(req.IP) {
+			if err := p.xdpMgr.BanIP(req.IP); err != nil {
+				logger.Warn("XDP Map insertion failed", "ip", req.IP, "err", err)
+			}
+		}
+	}
+
+	if p.cfg.Protection.Ban.UseIptables {
+		var restoreData strings.Builder
+		count := 0
+		for _, req := range batch {
+			if !p.isTrustedProxy(req.IP) {
+				timeoutSec := int(req.Duration.Seconds())
+				restoreData.WriteString(fmt.Sprintf("add mango_bans %s timeout %d -exist\n", req.IP, timeoutSec))
+				count++
+			}
+		}
+		if count > 0 {
+			cmd := exec.Command("ipset", "restore")
+			cmd.Stdin = strings.NewReader(restoreData.String())
+			if err := cmd.Run(); err != nil {
+				logger.Debug("IPSet batch ban skipped or failed", "error", err)
+			}
+		}
+	}
 }

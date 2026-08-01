@@ -134,13 +134,13 @@ func NewGracefulDegrader() *GracefulDegrader {
 			{
 				Name:            "elevated",
 				RPSThreshold:    500,
-				DisableFeatures: []string{"detailed_logging", "slow_queries"},
+				DisableFeatures: []string{"detailed_logging", "slow_queries", "waf_deep_inspect"},
 				RateLimitFactor: 0.8,
 			},
 			{
 				Name:            "high",
 				RPSThreshold:    2000,
-				DisableFeatures: []string{"detailed_logging", "slow_queries", "reputation_lookup", "geo_lookup"},
+				DisableFeatures: []string{"detailed_logging", "slow_queries", "reputation_lookup", "geo_lookup", "waf_deep_inspect"},
 				RateLimitFactor: 0.5,
 			},
 			{

@@ -25,6 +25,8 @@ services:
       - /sys/fs/bpf:/sys/fs/bpf
     environment:
       - TZ=Asia/Ho_Chi_Minh
+      - GOGC=200
+      - GOMEMLIMIT=6000MiB
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "mango-test-site:host-gateway"

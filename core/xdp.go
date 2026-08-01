@@ -2,36 +2,29 @@ package core
 
 import (
 	"encoding/binary"
-	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"os/user"
-	"strconv"
 	"strings"
-	"unsafe"
 
 	"mango-waf/config"
 	"mango-waf/logger"
 
-	"golang.org/x/sys/unix"
+	"github.com/cilium/ebpf"
 )
 
 // XDPManager provides a high-performance eBPF/XDP mapping interface for hardware-level dropping
 type XDPManager struct {
-	Enabled       bool
-	MapName       string
-	BPFToolBinary string
-	mapFD         int // Native File Descriptor for zero-fork BPF map updates
-	mapID         int // BPF Map ID for bpftool operations
+	Enabled bool
+	MapName string
+	bpfMap  *ebpf.Map
 }
 
 func NewXDPManager(cfg *config.Config) *XDPManager {
 	x := &XDPManager{
 		MapName: "blacklist",
-		mapFD:   -1,
-		mapID:   -1,
 	}
 
 	if cfg == nil || !cfg.XDP.Enabled {
@@ -62,53 +55,69 @@ func NewXDPManager(cfg *config.Config) *XDPManager {
 		if pinPath == "" {
 			continue
 		}
-		fd, err := bpfObjGet(pinPath)
-		if err == nil && fd > 0 {
-			x.mapFD = fd
+		m, err := ebpf.LoadPinnedMap(pinPath, nil)
+		if err == nil && m != nil {
+			x.bpfMap = m
 			x.Enabled = true
-			logger.Info("XDP eBPF Native Map FD acquired (zero-fork mode)", "path", pinPath, "fd", fd)
+			logger.Info("XDP eBPF Native Map loaded via cilium/ebpf", "path", pinPath)
 			return x
 		}
 	}
 
-	// 4. Fallback: discover bpftool for bootstrap and map discovery
-	path, err := exec.LookPath("bpftool")
-	if err != nil {
-		path = "/usr/sbin/bpftool"
-	}
-	if _, err := os.Stat(path); err == nil {
-		x.BPFToolBinary = path
-		mapID := findBPFMapID(path, x.MapName)
-		if mapID > 0 {
-			x.mapID = mapID
-			x.Enabled = true
-			logger.Info("XDP eBPF Hardware Dropping Enabled via bpftool bootstrap", "map_id", mapID)
-			return x
+	// 4. Try to find the active unpinned map created by ip link
+	var mapID ebpf.MapID
+	var err error
+	for {
+		mapID, err = ebpf.MapGetNextID(mapID)
+		if err != nil {
+			break
 		}
-	}
-
-	// 5. Create standalone BPF hash map if not found — allows XDP blacklist
-	// to work inside Docker containers with CAP_BPF + /sys/fs/bpf mounted
-	if _, err := os.Stat("/sys/fs/bpf"); err == nil {
-		fd, err := bpfMapCreate(1, 4, 8, 1000000) // BPF_MAP_TYPE_HASH, key=4 (IPv4), val=8 (counter), max=1M
-		if err == nil && fd > 0 {
-			x.mapFD = fd
+		m, err := ebpf.NewMapFromID(mapID)
+		if err != nil {
+			continue
+		}
+		info, err := m.Info()
+		if err == nil && info.Name == "blacklist" && info.Type == ebpf.Hash {
+			x.bpfMap = m
 			x.Enabled = true
 
-			// Pin the map so it persists across restarts
+			// Pin it for future restarts
 			pinPath := cfg.XDP.MapPinPath
 			if pinPath == "" {
 				pinPath = "/sys/fs/bpf/mango_blacklist"
 			}
-			if err := bpfObjPin(fd, pinPath); err != nil {
-				logger.Warn("XDP BPF map created but pinning failed (map still active in-memory)", "error", err)
+			if err := m.Pin(pinPath); err == nil {
+				logger.Info("Discovered active XDP map and pinned it", "id", mapID, "path", pinPath)
 			} else {
-				logger.Info("XDP eBPF blacklist map created and pinned", "path", pinPath, "fd", fd)
+				logger.Info("Discovered active XDP map but pinning failed (already pinned?)", "id", mapID)
 			}
 			return x
 		}
-		if err != nil {
-			logger.Warn("XDP BPF_MAP_CREATE failed", "error", err)
+		m.Close()
+	}
+
+	// 5. Create standalone BPF hash map if not found
+	if _, err := os.Stat("/sys/fs/bpf"); err == nil {
+		spec := &ebpf.MapSpec{
+			Name:       "blacklist",
+			Type:       ebpf.Hash,
+			KeySize:    4,
+			ValueSize:  8,
+			MaxEntries: 1000000,
+		}
+		m, err := ebpf.NewMap(spec)
+		if err == nil && m != nil {
+			x.bpfMap = m
+			x.Enabled = true
+
+			pinPath := cfg.XDP.MapPinPath
+			if pinPath == "" {
+				pinPath = "/sys/fs/bpf/mango_blacklist"
+			}
+			if err := m.Pin(pinPath); err == nil {
+				logger.Info("XDP eBPF blacklist map created and pinned", "path", pinPath)
+			}
+			return x
 		}
 	}
 
@@ -119,32 +128,6 @@ func NewXDPManager(cfg *config.Config) *XDPManager {
 		logger.Warn("XDP map 'blacklist' not found. Run xdp/setup_xdp.sh or ensure xdp_mango runs on NIC.")
 	}
 	return x
-}
-
-type BPFMapInfo struct {
-	ID         int    `json:"id"`
-	Name       string `json:"name"`
-	Type       string `json:"type"`
-	BytesKey   int    `json:"bytes_key"`
-	BytesValue int    `json:"bytes_value"`
-	MaxEntries int    `json:"max_entries"`
-}
-
-func findBPFMapID(bpftoolPath, mapName string) int {
-	out, err := exec.Command(bpftoolPath, "-j", "map", "show").Output()
-	if err != nil {
-		return -1
-	}
-	var maps []BPFMapInfo
-	if err := json.Unmarshal(out, &maps); err != nil {
-		return -1
-	}
-	for _, m := range maps {
-		if m.Name == mapName || (m.Type == "hash" && m.BytesKey == 4 && m.BytesValue == 8 && m.MaxEntries == 1000000) {
-			return m.ID
-		}
-	}
-	return -1
 }
 
 func (x *XDPManager) ensureAttached(cfg *config.Config) {
@@ -160,14 +143,12 @@ func (x *XDPManager) ensureAttached(cfg *config.Config) {
 		return
 	}
 
-	// Check if already attached to NIC
 	out, err := exec.Command("ip", "link", "show", "dev", nic).Output()
 	if err == nil && strings.Contains(string(out), "xdp") {
 		logger.Info("XDP filter already attached to network interface", "interface", nic)
 		return
 	}
 
-	// Compile C source if mango_xdp.o missing and clang exists
 	objFile := "xdp/mango_xdp.o"
 	if _, err := os.Stat(objFile); os.IsNotExist(err) {
 		if cfg.XDP.AutoCompile {
@@ -181,13 +162,11 @@ func (x *XDPManager) ensureAttached(cfg *config.Config) {
 		}
 	}
 
-	// Safety check for primary host physical interface eth0
 	if (nic == "eth0" || nic == "ens3" || nic == "enp1s0") && os.Getenv("MANGO_XDP_HOST_ATTACH") != "true" {
-		logger.Info("XDP eBPF map active in zero-fork mode. Auto-attach to host primary NIC ("+nic+") skipped to preserve SSH/Cloudflare connectivity. (Set MANGO_XDP_HOST_ATTACH=true or run xdp/setup_xdp.sh to attach).", "interface", nic)
+		logger.Info("XDP eBPF map active. Auto-attach to host primary NIC (" + nic + ") skipped to preserve SSH. Set MANGO_XDP_HOST_ATTACH=true to override.")
 		return
 	}
 
-	// Attach XDP object to NIC
 	if _, err := os.Stat(objFile); err == nil {
 		modeFlag := "xdpgeneric"
 		if cfg.XDP.Mode == "drv" || cfg.XDP.Mode == "native" {
@@ -199,7 +178,6 @@ func (x *XDPManager) ensureAttached(cfg *config.Config) {
 		} else {
 			logger.Info("Auto-attached XDP filter to network interface", "interface", nic, "mode", modeFlag)
 
-			// Pin map to /sys/fs/bpf/mango_blacklist if not already pinned
 			pinPath := cfg.XDP.MapPinPath
 			if pinPath == "" {
 				pinPath = "/sys/fs/bpf/mango_blacklist"
@@ -233,61 +211,31 @@ func getMachineArch() string {
 	return strings.TrimSpace(string(out))
 }
 
-// BanIP pushes the banned IP address securely down to the NIC driver layer
+// BanIP pushes the banned IP address securely down to the NIC driver layer natively via cilium/ebpf
 func (x *XDPManager) BanIP(ipAddr string) error {
-	if !x.Enabled {
+	if !x.Enabled || x.bpfMap == nil {
 		return nil
 	}
 
 	parsedIP := net.ParseIP(ipAddr)
-	if parsedIP == nil {
-		return fmt.Errorf("invalid ip")
+	if parsedIP == nil || parsedIP.To4() == nil {
+		return fmt.Errorf("invalid IPv4")
 	}
-
 	ipv4 := parsedIP.To4()
-	if ipv4 == nil {
-		return fmt.Errorf("XDP currently supports IPv4 only") // Map key size is 4 bytes
+
+	key := binary.BigEndian.Uint32(ipv4)
+	var val uint64 = 0
+
+	err := x.bpfMap.Update(&key, &val, ebpf.UpdateAny)
+	if err != nil {
+		return fmt.Errorf("cilium/ebpf map update failed: %w", err)
 	}
-
-	// Native zero-fork syscall update if mapFD is open
-	if x.mapFD > 0 {
-		key := binary.BigEndian.Uint32(ipv4)
-		var val uint64 = 0
-		err := bpfMapUpdateElem(x.mapFD, unsafe.Pointer(&key), unsafe.Pointer(&val), 0)
-		if err != nil {
-			return fmt.Errorf("native bpf_map_update_elem failed: %w", err)
-		}
-		return nil
-	}
-
-	// Subprocess fallback by mapID or map name
-	if x.BPFToolBinary != "" {
-		hexIP := fmt.Sprintf("hex %02x %02x %02x %02x", ipv4[0], ipv4[1], ipv4[2], ipv4[3])
-		hexVal := "hex 00 00 00 00 00 00 00 00"
-
-		var args []string
-		if x.mapID > 0 {
-			args = []string{"map", "update", "id", strconv.Itoa(x.mapID), "key"}
-		} else {
-			args = []string{"map", "update", "name", x.MapName, "key"}
-		}
-		args = append(args, strings.Split(hexIP, " ")...)
-		args = append(args, "value")
-		args = append(args, strings.Split(hexVal, " ")...)
-
-		cmd := exec.Command(x.BPFToolBinary, args...)
-		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("failed to update bpf map: %v", err)
-		}
-		return nil
-	}
-
 	return nil
 }
 
-// UnbanIP removes the IP address from the Hardware NIC drop list
+// UnbanIP removes the IP address from the Hardware NIC drop list natively
 func (x *XDPManager) UnbanIP(ipAddr string) error {
-	if !x.Enabled {
+	if !x.Enabled || x.bpfMap == nil {
 		return nil
 	}
 
@@ -297,235 +245,35 @@ func (x *XDPManager) UnbanIP(ipAddr string) error {
 	}
 	ipv4 := parsedIP.To4()
 
-	if x.mapFD > 0 {
-		key := binary.BigEndian.Uint32(ipv4)
-		err := bpfMapDeleteElem(x.mapFD, unsafe.Pointer(&key))
-		if err != nil {
-			return fmt.Errorf("native bpf_map_delete_elem failed: %w", err)
-		}
-		return nil
-	}
-
-	if x.BPFToolBinary != "" {
-		hexIP := fmt.Sprintf("hex %02x %02x %02x %02x", ipv4[0], ipv4[1], ipv4[2], ipv4[3])
-		var args []string
-		if x.mapID > 0 {
-			args = []string{"map", "delete", "id", strconv.Itoa(x.mapID), "key"}
-		} else {
-			args = []string{"map", "delete", "name", x.MapName, "key"}
-		}
-		args = append(args, strings.Split(hexIP, " ")...)
-
-		cmd := exec.Command(x.BPFToolBinary, args...)
-		return cmd.Run()
-	}
-
-	return nil
-}
-
-// Direct Linux BPF Syscall Helpers (zero-fork syscall operations)
-
-type bpfAttrObjGet struct {
-	pathname uint64
-	bpfFd    uint32
-	pad      uint32
-}
-
-type bpfAttrMapElem struct {
-	mapFd uint32
-	pad0  uint32
-	key   uint64
-	value uint64
-	flags uint64
-}
-
-func bpfObjGet(path string) (int, error) {
-	pathBytes, err := unix.BytePtrFromString(path)
-	if err != nil {
-		return -1, err
-	}
-	attr := bpfAttrObjGet{
-		pathname: uint64(uintptr(unsafe.Pointer(pathBytes))),
-	}
-	r1, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(7), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
-	if errno != 0 {
-		return -1, errno
-	}
-	return int(r1), nil
-}
-
-// bpfAttrMapCreate corresponds to BPF_MAP_CREATE union bpf_attr fields
-type bpfAttrMapCreate struct {
-	mapType    uint32
-	keySize    uint32
-	valueSize  uint32
-	maxEntries uint32
-	mapFlags   uint32
-}
-
-// bpfMapCreate creates a new BPF hash map via BPF_MAP_CREATE (cmd=0)
-func bpfMapCreate(mapType, keySize, valueSize, maxEntries uint32) (int, error) {
-	attr := bpfAttrMapCreate{
-		mapType:    mapType,
-		keySize:    keySize,
-		valueSize:  valueSize,
-		maxEntries: maxEntries,
-	}
-	r1, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(0), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
-	if errno != 0 {
-		return -1, errno
-	}
-	return int(r1), nil
-}
-
-// bpfObjPin pins a BPF object (map/prog) to a filesystem path via BPF_OBJ_PIN (cmd=6)
-func bpfObjPin(fd int, path string) error {
-	pathBytes, err := unix.BytePtrFromString(path)
-	if err != nil {
-		return err
-	}
-	// Reuse bpfAttrObjGet struct layout — pathname + fd
-	type bpfAttrObjPin struct {
-		pathname uint64
-		bpfFd    uint32
-		pad      uint32
-	}
-	attr := bpfAttrObjPin{
-		pathname: uint64(uintptr(unsafe.Pointer(pathBytes))),
-		bpfFd:    uint32(fd),
-	}
-	_, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(6), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
-	if errno != 0 {
-		return errno
+	key := binary.BigEndian.Uint32(ipv4)
+	err := x.bpfMap.Delete(&key)
+	if err != nil && !strings.Contains(err.Error(), "key does not exist") {
+		return fmt.Errorf("cilium/ebpf map delete failed: %w", err)
 	}
 	return nil
 }
 
-func bpfMapUpdateElem(fd int, key, value unsafe.Pointer, flags uint64) error {
-	attr := bpfAttrMapElem{
-		mapFd: uint32(fd),
-		key:   uint64(uintptr(key)),
-		value: uint64(uintptr(value)),
-		flags: flags,
-	}
-	_, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(2), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func bpfMapDeleteElem(fd int, key unsafe.Pointer) error {
-	attr := bpfAttrMapElem{
-		mapFd: uint32(fd),
-		key:   uint64(uintptr(key)),
-	}
-	_, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(3), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func bpfMapGetNextKey(fd int, key, nextKey unsafe.Pointer) error {
-	type bpfAttrMapGetNextKey struct {
-		mapFd   uint32
-		pad0    uint32
-		key     uint64
-		nextKey uint64
-	}
-	attr := bpfAttrMapGetNextKey{
-		mapFd:   uint32(fd),
-		key:     uint64(uintptr(key)),
-		nextKey: uint64(uintptr(nextKey)),
-	}
-	_, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(4), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-func bpfMapLookupElem(fd int, key, value unsafe.Pointer) error {
-	type bpfAttrMapLookupElem struct {
-		mapFd uint32
-		pad0  uint32
-		key   uint64
-		value uint64
-		flags uint64
-	}
-	attr := bpfAttrMapLookupElem{
-		mapFd: uint32(fd),
-		key:   uint64(uintptr(key)),
-		value: uint64(uintptr(value)),
-	}
-	_, _, errno := unix.Syscall(unix.SYS_BPF, uintptr(1), uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
-	if errno != 0 {
-		return errno
-	}
-	return nil
-}
-
-// GetStats returns the number of IPs currently in the hardware blacklist and total packets dropped
+// GetStats returns the number of IPs currently in the hardware blacklist and total packets dropped natively
 func (x *XDPManager) GetStats() (int64, int64) {
-	if !x.Enabled {
+	if !x.Enabled || x.bpfMap == nil {
 		return 0, 0
 	}
 
-	if x.mapFD > 0 {
-		var key, nextKey uint32
-		var value uint64
-		var count int64
-		var totalDrops int64
+	var count int64
+	var totalDrops int64
 
-		// Pass nil as key to get the first key
-		err := bpfMapGetNextKey(x.mapFD, nil, unsafe.Pointer(&nextKey))
-		for err == nil {
-			count++
-			if bpfMapLookupElem(x.mapFD, unsafe.Pointer(&nextKey), unsafe.Pointer(&value)) == nil {
-				totalDrops += int64(value)
-			}
-			key = nextKey
-			err = bpfMapGetNextKey(x.mapFD, unsafe.Pointer(&key), unsafe.Pointer(&nextKey))
-		}
-		return count, totalDrops
+	var key uint32
+	var value uint64
+
+	iter := x.bpfMap.Iterate()
+	for iter.Next(&key, &value) {
+		count++
+		totalDrops += int64(value)
 	}
 
-	if x.BPFToolBinary != "" {
-		var cmd *exec.Cmd
-		if x.mapID > 0 {
-			cmd = exec.Command(x.BPFToolBinary, "-j", "map", "dump", "id", strconv.Itoa(x.mapID))
-		} else {
-			cmd = exec.Command(x.BPFToolBinary, "-j", "map", "dump", "name", x.MapName)
-		}
-		out, err := cmd.Output()
-		if err != nil {
-			return 0, 0
-		}
-
-		type BPFEntry struct {
-			Key   []string `json:"key"`
-			Value []string `json:"value"`
-		}
-		var entries []BPFEntry
-		if err := json.Unmarshal(out, &entries); err != nil {
-			return 0, 0
-		}
-
-		var totalDrops int64
-		for _, e := range entries {
-			if len(e.Value) == 8 {
-				var val uint64
-				for i := 0; i < 8; i++ {
-					var b byte
-					fmt.Sscanf(e.Value[i], "0x%x", &b)
-					val |= uint64(b) << (i * 8)
-				}
-				totalDrops += int64(val)
-			}
-		}
-		return int64(len(entries)), totalDrops
+	if err := iter.Err(); err != nil {
+		logger.Warn("Failed to iterate BPF map", "error", err)
 	}
 
-	return 0, 0
+	return count, totalDrops
 }

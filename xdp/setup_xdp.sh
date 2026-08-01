@@ -56,7 +56,7 @@ sudo ip link set dev "$NIC" xdpgeneric obj mango_xdp.o sec xdp_mango
 
 echo "
 ===================================================
-✅ M A N G O   S H I E L D   --   X D P   A C T I V E
+✅ M A N G O   S H I E L D  --  X D P   A C T I V E
 ===================================================
 The Kernel-level packet filter has been attached to interface \$NIC.
 
@@ -65,3 +65,12 @@ To remove it, run:
 
 To manage banned IPs, you can use bpftool or interact via the Go application later.
 ==================================================="
+
+# 5. Pin the XDP map so that the Go application can find it directly
+echo "[*] Pinning the blacklist map to /sys/fs/bpf/mango_blacklist..."
+sudo mkdir -p /sys/fs/bpf
+sudo mount -t bpf none /sys/fs/bpf 2>/dev/null || true
+# Wait for the map to be available
+sleep 1
+sudo bpftool map pin name blacklist /sys/fs/bpf/mango_blacklist 2>/dev/null || true
+echo "[*] Pinning complete."

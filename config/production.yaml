@@ -212,29 +212,29 @@ protection:
 
   rate_limit:
     enabled: true
-    requests_per_second: 25
-    burst: 50
+    requests_per_second: 20
+    burst: 40
     per_ip: true
     adaptive: true
 
   connection_limit:
-    max_per_ip: 50
+    max_per_ip: 30
     max_total: 50000
 
   challenge:
-    pow_difficulty: 3
+    pow_difficulty: 4
     pow_adaptive: true
     cookie_ttl: 1h
     cookie_secret: "${MANGO_COOKIE_SECRET}"
 
   ban:
-    duration: 1h
+    duration: 24h
     max_fails: 3
     use_iptables: true
 
   emergency:
-    rps_threshold: 50
-    duration: 10m
+    rps_threshold: 3000
+    duration: 1h
     auto_enable: true
 
 # ------------------------------------------------------------------------------
@@ -389,10 +389,10 @@ detection:
 
     # Purpose: Sensitivity multiplier for anomaly detection (lower = more sensitive).
     # Valid Values: 1.0 to 5.0
-    # Recommended Production Value: 2.0
+    # Recommended Production Value: 1.5
     # Performance Impact: None
     # Security Impact: Balances false positive prevention with threat detection.
-    sensitivity: 2.0
+    sensitivity: 1.5
 
   bot_classifier:
     # Purpose: Enable ML heuristic bot classification engine.

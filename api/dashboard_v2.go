@@ -1920,23 +1920,6 @@ async function refreshData() {
     const bans = stats.active_bans || 0;
     setText('map-banned-count', formatNum(bans));
 
-    fetchJSON('/api/logs/query?type=&search=').then(function(logsData) {
-      window._geoCountryStats = {};
-      if (logsData && Array.isArray(logsData.logs)) {
-        logsData.logs.forEach(function(l) {
-          var code = (l.country_code || '').toUpperCase();
-          if (!code || code === 'XX' || code === 'UNKNOWN') return;
-          if (!window._geoCountryStats[code]) {
-            window._geoCountryStats[code] = {count: 0, l7: 0, l4: 0};
-          }
-          window._geoCountryStats[code].count++;
-          if (l.type === 'EXPLOIT' || l.type === 'SECURITY') window._geoCountryStats[code].l7++;
-          else window._geoCountryStats[code].l4++;
-        });
-      }
-      refreshCountryStatsUI();
-    });
-
     fetchJSON('/api/nodes').then(function(data) {
       if (data && data.nodes) {
         const topbarBadge = document.getElementById('topbar-node-badge');
@@ -3442,7 +3425,7 @@ function initAttackMap() {
       speed: 0.008 + Math.random() * 0.012,
       curvature: (Math.random() - 0.5) * 0.6
     });
-    if (attackArcs.length > 60) attackArcs.shift();
+    if (attackArcs.length > 500) attackArcs.shift();
   }
 
   function loadWafNodes() {
@@ -3508,6 +3491,24 @@ function initAttackMap() {
     }).catch(function(err) {});
 
   // Connect SSE Live Telemetry Stream - accumulate geo country stats from REAL geoIP events
+  // Initial populate of attack map history (One-time fetch to prevent empty map on load)
+  fetchJSON('/api/logs/query?type=&search=').then(function(logsData) {
+    window._geoCountryStats = {};
+    if (logsData && Array.isArray(logsData.logs)) {
+      logsData.logs.forEach(function(l) {
+        var code = (l.country_code || '').toUpperCase();
+        if (!code || code === 'XX' || code === 'UNKNOWN') return;
+        if (!window._geoCountryStats[code]) {
+          window._geoCountryStats[code] = {count: 0, l7: 0, l4: 0};
+        }
+        window._geoCountryStats[code].count++;
+        if (l.type === 'EXPLOIT' || l.type === 'SECURITY') window._geoCountryStats[code].l7++;
+        else window._geoCountryStats[code].l4++;
+      });
+    }
+    refreshCountryStatsUI();
+  });
+
   if (window.EventSource) {
     var evtSource = new EventSource('/api/attack-stream');
     evtSource.onmessage = function(e) {
@@ -3539,7 +3540,12 @@ function initAttackMap() {
           processAttackEvent(evt);
         });
         if (needsUIUpdate) {
-          refreshCountryStatsUI();
+          if (!window._refreshUITimeout) {
+            window._refreshUITimeout = setTimeout(function() {
+              refreshCountryStatsUI();
+              window._refreshUITimeout = null;
+            }, 500);
+          }
         }
       } catch (err) {}
     };

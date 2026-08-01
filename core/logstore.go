@@ -105,13 +105,13 @@ func (ls *LogStore) RecordEvent(eventType, clientIP, domain, method, path string
 	}
 
 	// Smart Log Sampling under DDoS / Heavy Load (> 200 RPS):
-	// Under DDoS, sampling high-frequency repetitive logs prevents API & UI lag
+	// Under DDoS, sampling high-frequency repetitive logs prevents API & UI lag, and GC storms
 	if ls.curRPS != nil {
 		rps := atomic.LoadInt64(ls.curRPS)
 		if rps > 200 {
 			if eventType == "ACCESS" ||
 				(eventType == "CHALLENGE" && action == "CHALLENGE_REQUIRED") ||
-				(eventType == "SECURITY" && rule == "rate_limit") {
+				(eventType == "SECURITY" && (rule == "rate_limit" || rule == "banned" || rule == "ddos_flood_xdp" || rule == "auto_l7_drop" || rule == "conn_limit" || rule == "rate_limited")) {
 				// Sample 1 out of 50 logs during DDoS surge
 				if rand.Intn(50) != 0 {
 					return

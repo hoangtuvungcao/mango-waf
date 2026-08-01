@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	crypto_rand "crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
@@ -294,7 +295,7 @@ func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
 	st.mu.RLock()
 	var authUser *UserAccount
 	for _, u := range st.Data.Users {
-		if strings.EqualFold(u.Username, req.Username) && u.Password == req.Password {
+		if strings.EqualFold(u.Username, req.Username) && subtle.ConstantTimeCompare([]byte(u.Password), []byte(req.Password)) == 1 {
 			tmp := u
 			authUser = &tmp
 			break
@@ -311,7 +312,12 @@ func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if authUser != nil {
-		token := fmt.Sprintf("mango-session-%d", time.Now().UnixNano())
+		b := make([]byte, 32)
+		if _, err := crypto_rand.Read(b); err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		token := fmt.Sprintf("mango-session-%x", b)
 
 		st.mu.Lock()
 		for i, u := range st.Data.Users {
@@ -328,6 +334,7 @@ func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
 			Value:    token,
 			Path:     "/",
 			HttpOnly: true,
+			SameSite: http.SameSiteStrictMode,
 			MaxAge:   86400,
 		})
 		writeJSON(w, map[string]interface{}{
@@ -1245,8 +1252,10 @@ func (d *Dashboard) corsMiddleware(next http.Handler) http.Handler {
 
 		origin := r.Header.Get("Origin")
 		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
+			if strings.Contains(origin, r.Host) || strings.Contains(origin, "localhost") || strings.Contains(origin, "127.0.0.1") {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+			}
 		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
@@ -1817,7 +1826,7 @@ func (d *Dashboard) handleDomainProtectionMode(w http.ResponseWriter, r *http.Re
 	// Find and update the domain's protection mode
 	found := false
 	cfgClone := d.getConfigClone()
-		for i, dom := range cfgClone.Domains {
+	for i, dom := range cfgClone.Domains {
 		if strings.EqualFold(dom.Name, req.Domain) {
 			cfgClone.Domains[i].ProtectionMode = req.ProtectionMode
 			found = true
@@ -1927,7 +1936,6 @@ func (d *Dashboard) handleSecurityRules(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, map[string]interface{}{"status": "error", "message": err.Error()})
 			return
 		}
-
 
 		GetAuditLogger().LogAction(username, role, "SECURITY_UPDATE", "security", "global", fmt.Sprintf("Mode: %s, Paranoia: %d, RPS: %d, Burst: %d", currentCfg.Protection.Mode, currentCfg.WAF.ParanoiaLevel, currentCfg.Protection.RateLimit.RequestsPerSecond, currentCfg.Protection.RateLimit.Burst), clientIP, "success")
 		writeJSON(w, map[string]interface{}{"status": "success", "message": "Security rules updated & hot-reloaded successfully"})

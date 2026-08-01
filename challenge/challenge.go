@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"net/http"
 	"strconv"
 	"strings"
@@ -308,11 +309,11 @@ func (m *Manager) serveJSChallenge(w http.ResponseWriter, r *http.Request, diffi
 		clientIP = strings.TrimSpace(strings.Split(xff, ",")[0])
 	}
 
-	html := fmt.Sprintf(powTemplate, r.Host, clientIP, rayID, challengeStr, difficulty, difficulty, r.URL.RequestURI())
+	htmlTemplate := fmt.Sprintf(powTemplate, html.EscapeString(r.Host), html.EscapeString(clientIP), html.EscapeString(rayID), html.EscapeString(challengeStr), difficulty, difficulty, html.EscapeString(r.URL.RequestURI()))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache")
 	w.WriteHeader(http.StatusForbidden)
-	w.Write([]byte(html))
+	w.Write([]byte(htmlTemplate))
 }
 
 // serveCAPTCHAChallenge serves the Modern Hold-to-Verify interaction
@@ -331,19 +332,19 @@ func (m *Manager) serveCAPTCHAChallenge(w http.ResponseWriter, r *http.Request) 
 		clientIP = strings.TrimSpace(strings.Split(xff, ",")[0])
 	}
 
-	html := fmt.Sprintf(captchaTemplate, r.Host, r.URL.RequestURI(), ts, hash, clientIP, rayID)
+	htmlTemplate := fmt.Sprintf(captchaTemplate, html.EscapeString(r.Host), html.EscapeString(r.URL.RequestURI()), ts, html.EscapeString(hash), html.EscapeString(clientIP), html.EscapeString(rayID))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store, no-cache")
 	w.WriteHeader(http.StatusForbidden)
-	w.Write([]byte(html))
+	w.Write([]byte(htmlTemplate))
 }
 
 // serveSilentChallenge serves invisible JS challenge
 func (m *Manager) serveSilentChallenge(w http.ResponseWriter, r *http.Request) {
-	html := fmt.Sprintf(silentTemplate, r.URL.RequestURI())
+	htmlTemplate := fmt.Sprintf(silentTemplate, html.EscapeString(r.URL.RequestURI()))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte(html))
+	w.Write([]byte(htmlTemplate))
 }
 
 // ServeBlockPage serves the commercial WAF HTTP 403 Forbidden page
@@ -355,11 +356,11 @@ func (m *Manager) ServeBlockPage(w http.ResponseWriter, r *http.Request, clientI
 		ruleInfo = fmt.Sprintf("%s (%s)", ruleID, reason)
 	}
 
-	html := fmt.Sprintf(blockTemplate, r.Host, clientIP, rayID, ruleInfo, ts)
+	htmlTemplate := fmt.Sprintf(blockTemplate, html.EscapeString(r.Host), html.EscapeString(clientIP), html.EscapeString(rayID), html.EscapeString(ruleInfo), ts)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Mango-Shield", "blocked")
 	w.WriteHeader(http.StatusForbidden)
-	w.Write([]byte(html))
+	w.Write([]byte(htmlTemplate))
 }
 
 // ServeRateLimitPage serves the commercial HTTP 403 Forbidden page (replaces 429 to prevent Cloudflare Error 1200)
@@ -369,12 +370,12 @@ func (m *Manager) ServeRateLimitPage(w http.ResponseWriter, r *http.Request, cli
 		retryAfterSeconds = 10
 	}
 
-	html := fmt.Sprintf(rateLimitTemplate, r.Host, retryAfterSeconds, clientIP, rayID, retryAfterSeconds)
+	htmlTemplate := fmt.Sprintf(rateLimitTemplate, html.EscapeString(r.Host), retryAfterSeconds, html.EscapeString(clientIP), html.EscapeString(rayID), retryAfterSeconds)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 	w.Header().Set("X-Mango-Shield", "rate-limited")
-	w.WriteHeader(http.StatusForbidden)
-	w.Write([]byte(html))
+	w.WriteHeader(http.StatusTooManyRequests)
+	w.Write([]byte(htmlTemplate))
 }
 
 // ServeAccessDeniedPage serves the commercial HTTP 401/403 Security Policy page
@@ -384,9 +385,9 @@ func (m *Manager) ServeAccessDeniedPage(w http.ResponseWriter, r *http.Request, 
 		policy = "Unauthorized Client Request"
 	}
 
-	html := fmt.Sprintf(accessDeniedTemplate, r.Host, policy, clientIP, rayID)
+	htmlTemplate := fmt.Sprintf(accessDeniedTemplate, html.EscapeString(r.Host), html.EscapeString(policy), html.EscapeString(clientIP), html.EscapeString(rayID))
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Mango-Shield", "denied")
 	w.WriteHeader(http.StatusForbidden)
-	w.Write([]byte(html))
+	w.Write([]byte(htmlTemplate))
 }
