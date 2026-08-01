@@ -57,6 +57,22 @@ int xdp_drop_banned(struct xdp_md *ctx) {
   // 4. Extract Source IPv4 address
   __u32 src_ip = ip->saddr;
 
+  // 4.1. Bypass SSH (Port 22) to prevent admin lockout
+  if (ip->protocol == IPPROTO_TCP) {
+    // Note: ip->ihl is length in 32-bit words
+    struct tcphdr {
+      __be16 source;
+      __be16 dest;
+      // ... we only need dest
+    } *tcp = (void *)ip + (ip->ihl * 4);
+    
+    if ((void *)(tcp + 1) <= data_end) {
+      if (tcp->dest == bpf_htons(22)) {
+        return XDP_PASS;
+      }
+    }
+  }
+
   // 5. Query BPF blacklist HASH map
   __u64 *drop_count = bpf_map_lookup_elem(&blacklist, &src_ip);
   if (drop_count) {

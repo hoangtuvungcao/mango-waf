@@ -27,6 +27,7 @@ services:
       - TZ=Asia/Ho_Chi_Minh
       - GOGC=200
       - GOMEMLIMIT=6000MiB
+      - MANGO_XDP_HOST_ATTACH=true
     extra_hosts:
       - "host.docker.internal:host-gateway"
       - "mango-test-site:host-gateway"
