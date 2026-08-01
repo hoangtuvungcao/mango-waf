@@ -720,6 +720,9 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 				if redirectPath == "" {
 					redirectPath = "/"
 				}
+				// CRITICAL: Force connection close to prevent Keep-Alive corruption if there are unread bytes in the POST body.
+				// This fixes Cloudflare Error 520 after solving Captcha/JS challenge.
+				w.Header().Set("Connection", "close")
 				http.Redirect(w, r, redirectPath, http.StatusFound)
 				return
 			}
@@ -745,10 +748,12 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 				}
 
 				if s.challMgr != nil {
+					w.Header().Set("Connection", "close") // Prevent 520
 					s.challMgr.ServeRateLimitPage(w, r, ip, 10)
 				} else {
 					w.Header().Set("Content-Type", "text/html; charset=utf-8")
 					w.Header().Set("X-Mango-Shield", "rate-limited")
+					w.Header().Set("Connection", "close") // Prevent 520
 					w.WriteHeader(http.StatusForbidden)
 					w.Write([]byte("403 Forbidden - Rate Limit Exceeded"))
 				}
@@ -763,10 +768,12 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 				atomic.AddInt64(&s.stats.BlockedRequests, 1)
 				GetLogStore().RecordEvent("EXPLOIT", ip, r.Host, r.Method, r.URL.Path, http.StatusForbidden, "BLOCKED", wafResult.TopRule, fmt.Sprintf("WAF %s exploit blocked (score %d)", wafResult.TopRule, wafResult.Score))
 				if s.challMgr != nil {
+					w.Header().Set("Connection", "close") // Prevent 520
 					s.challMgr.ServeBlockPage(w, r, ip, "WAF Exploit Protection", wafResult.TopRule)
 				} else {
 					w.Header().Set("Content-Type", "text/html; charset=utf-8")
 					w.Header().Set("X-Mango-Shield", "blocked")
+					w.Header().Set("Connection", "close") // Prevent 520
 					w.WriteHeader(http.StatusForbidden)
 					w.Write([]byte("403 Forbidden - WAF Protection"))
 				}
@@ -839,6 +846,9 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	case ActionChallenge:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
 		GetLogStore().RecordEvent("CHALLENGE", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusForbidden, "CHALLENGE_REQUIRED", action.Reason, "Security challenge triggered")
+		
+		w.Header().Set("Connection", "close") // Prevent 520 on subsequent requests
+
 		if s.challMgr != nil {
 			s.challMgr.ServeChallenge(w, r, action.Stage, action.Difficulty)
 		} else {
@@ -854,7 +864,28 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 			if !s.pipeline.isTrustedProxy(ip) {
 				s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
 			}
+			
+			w.Header().Set("Connection", "close") // Prevent 520
+
+			if s.challMgr != nil {
+				s.challMgr.ServeRateLimitPage(w, r, ip, 10)
+			} else {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte("403 Forbidden - Security Drop"))
+			}
+		} else {
+			w.Header().Set("Connection", "close") // Prevent 520
+			
+			if s.challMgr != nil {
+				s.challMgr.ServeBlockPage(w, r, ip, "Security Policy", action.Reason)
+			} else {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte("403 Forbidden - Blocked by WAF Policy"))
+			}
 		}
+
 		// Fast-path for high RPS attack surges to prevent CPU & rendering bottlenecks
 		fastPathThreshold := int64(s.cfg.Protection.Emergency.RPSThreshold * 2)
 		if fastPathThreshold <= 0 {
