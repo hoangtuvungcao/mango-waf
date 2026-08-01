@@ -908,13 +908,13 @@ body {
     <div class="card">
       <div class="card-title">Protection Stack</div>
       <table class="kv-table">
-        <tr><td>JA3 Fingerprinting</td><td>Enabled</td></tr>
-        <tr><td>JA4 Fingerprinting</td><td>Enabled</td></tr>
-        <tr><td>HTTP/2 Fingerprint</td><td>Enabled</td></tr>
-        <tr><td>Bot Classifier</td><td>Active</td></tr>
-        <tr><td>Behavior Analysis</td><td>Learning + Active</td></tr>
-        <tr><td>GeoIP Filtering</td><td>Enabled</td></tr>
-        <tr><td>Rate Limiter</td><td>30 rps / 60 burst</td></tr>
+        <tr><td>JA3 Fingerprinting</td><td id="cfg_ja3">--</td></tr>
+        <tr><td>JA4 Fingerprinting</td><td id="cfg_ja4">--</td></tr>
+        <tr><td>HTTP/2 Fingerprint</td><td id="cfg_http2">--</td></tr>
+        <tr><td>Bot Classifier</td><td id="cfg_bot">--</td></tr>
+        <tr><td>Behavior Analysis</td><td id="cfg_behavior">--</td></tr>
+        <tr><td>GeoIP Filtering</td><td id="cfg_geoip">--</td></tr>
+        <tr><td>Rate Limiter</td><td id="cfg_ratelimit">--</td></tr>
         <tr><td>Mesh P2P Cluster</td><td id="cfg_mesh">--</td></tr>
       </table>
     </div>
@@ -1267,13 +1267,22 @@ function fetchStats() {
     setText('c_ratio', cacheRatio + '%');
 
     // Settings
-    setText('cfg_mode', d.mode || 'auto');
+    setText('cfg_mode', d.mode || d.protection_mode || 'auto');
     setText('cfg_xdp', d.xdp_enabled ? 'Active (sys_bpf)' : 'Disabled');
     if (d.mesh_enabled || d.mesh_nodes > 0) {
         setText('cfg_mesh', 'Active (' + (d.mesh_nodes || 0) + ' nodes)');
     } else {
         setText('cfg_mesh', 'Disabled');
     }
+
+    // Dynamic config stack
+    setText('cfg_ja3', d.cfg_ja3 ? 'Enabled' : 'Disabled');
+    setText('cfg_ja4', d.cfg_ja4 ? 'Enabled' : 'Disabled');
+    setText('cfg_http2', d.cfg_http2 ? 'Enabled' : 'Disabled');
+    setText('cfg_bot', d.cfg_bot ? 'Active' : 'Disabled');
+    setText('cfg_behavior', d.cfg_behavior ? 'Learning + Active' : 'Disabled');
+    setText('cfg_geoip', d.cfg_geoip ? 'Enabled' : 'Disabled');
+    setText('cfg_ratelimit', (d.cfg_ratelimit_rps || 0) + ' rps / ' + (d.cfg_ratelimit_burst || 0) + ' burst');
 
     // Charts
     drawLineChart('homeChart', homeRps, 'rgb(6,182,212)', null, 'RPS');
