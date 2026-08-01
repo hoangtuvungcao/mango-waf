@@ -562,7 +562,7 @@ func (d *Dashboard) handleCachePurge(w http.ResponseWriter, r *http.Request) {
 
 func (d *Dashboard) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{
-		"status": "healthy", "version": "2.0.0",
+		"status": "healthy", "version": "v3.0",
 		"uptime": time.Since(d.stats.GetUptime()).String(),
 	})
 }

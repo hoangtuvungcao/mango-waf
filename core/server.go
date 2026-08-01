@@ -435,7 +435,7 @@ func (s *Shield) Start() error {
 		ReadTimeout:       s.cfg.Server.ReadTimeout,
 		WriteTimeout:      s.cfg.Server.WriteTimeout,
 		IdleTimeout:       s.cfg.Server.IdleTimeout, // Aggressively drop idle connections to prevent socket exhaustion during DDoS
-		ReadHeaderTimeout: 1500 * time.Millisecond,
+		ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes:    s.cfg.Server.MaxHeaderBytes,
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			if state != http.StateNew && state != http.StateClosed && state != http.StateHijacked {
@@ -1085,7 +1085,11 @@ func (s *Shield) attackDetector() {
 			}
 
 			// 2. System-wide Extreme Overload Trigger
-			isSystemAttack := rps > thresholdRPS*2 || conns > 500
+			thresholdConns := thresholdRPS * 5
+			if thresholdConns < 5000 {
+				thresholdConns = 5000 // Default at least 5000 conns for system-wide trigger
+			}
+			isSystemAttack := rps > thresholdRPS*2 || (conns > thresholdConns && rps > thresholdRPS/2)
 
 			if isSystemAttack {
 				normalCount = 0

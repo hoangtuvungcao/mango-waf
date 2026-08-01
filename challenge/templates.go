@@ -67,6 +67,10 @@ body {
 .meta-val { font-size: 12px; font-family: var(--font-mono); color: var(--text-main); font-weight: 600; word-break: break-all; }
 .footer { font-size: 11.5px; color: var(--text-muted); text-align: center; }
 .footer a { color: var(--accent-cyan); text-decoration: none; }
+@media (max-width: 480px) {
+  .card { padding: 24px; }
+  .meta-grid { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>
@@ -222,8 +226,12 @@ body { background: var(--bg-base); color: var(--text-main); font-family: var(--f
 .hold-text { position: absolute; top: 0; left: 0; width: 100%%; height: 100%%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 600; color: #fff; z-index: 2; }
 .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; background: rgba(6, 8, 19, 0.6); padding: 14px; border-radius: 12px; border: 1px solid var(--border); margin-top: 24px; text-align: left; }
 .meta-label { font-size: 10px; font-family: var(--font-mono); color: var(--text-muted); text-transform: uppercase; }
-.meta-val { font-size: 12px; font-family: var(--font-mono); color: var(--text-main); font-weight: 600; }
+.meta-val { font-size: 12px; font-family: var(--font-mono); color: var(--text-main); font-weight: 600; word-break: break-all; }
 .footer { margin-top: 24px; font-size: 11.5px; color: var(--text-muted); }
+@media (max-width: 480px) {
+  .card { padding: 24px; }
+  .meta-grid { grid-template-columns: 1fr; }
+}
 </style>
 </head>
 <body>

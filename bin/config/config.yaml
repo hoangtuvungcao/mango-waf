@@ -28,14 +28,14 @@ server:
   # Recommended Production Value: 10s
   # Performance Impact: Prevents slowloris connections from tying up worker goroutines.
   # Security Impact: Mitigates L7 Slowloris and Slow Read attacks.
-  read_timeout: 5s
+  read_timeout: 15s
 
   # Purpose: Maximum duration before timing out writes of the response.
   # Valid Values: Go duration string ("15s", "30s", "60s")
-  # Recommended Production Value: 30s
+  # Recommended Production Value: 45s (Must be > proxy response_timeout to prevent 520 errors)
   # Performance Impact: High throughput protection under slow client connections.
   # Security Impact: Prevents slow write resource exhaustion.
-  write_timeout: 15s
+  write_timeout: 45s
 
   # Purpose: Maximum amount of time to keep keep-alive connections idle.
   # Valid Values: Go duration string ("30s", "60s", "120s")
@@ -139,7 +139,7 @@ proxy:
   connect_timeout: 3s
 
   # Purpose: Timeout for receiving response headers from upstream backend.
-  response_timeout: 5s
+  response_timeout: 45s
 
   # Purpose: Maximum total idle HTTP connections kept open across all hosts.
   max_idle_conns: 50000
@@ -219,7 +219,7 @@ protection:
 
   connection_limit:
     max_per_ip: 30
-    max_total: 50000
+    max_total: 200000
 
   challenge:
     pow_difficulty: 4

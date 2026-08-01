@@ -34,6 +34,7 @@ type AlertManager struct {
 	queue      chan func()
 	tgStatus   TelegramStatusInfo
 	statusLock sync.RWMutex
+	httpClient *http.Client
 }
 
 // NewAlertManager creates a new alert manager
@@ -45,6 +46,14 @@ func NewAlertManager(cfg *config.Config) *AlertManager {
 		queue:    make(chan func(), 1000),
 		tgStatus: TelegramStatusInfo{
 			Connected: cfg.Alerts.Telegram.Enabled && cfg.Alerts.Telegram.Token != "" && cfg.Alerts.Telegram.ChatID != "",
+		},
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 20,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
 	}
 	go am.workerLoop()
@@ -148,40 +157,61 @@ func (a *AlertManager) SendDomainAttackStart(domain string, totalRPS, totalConns
 		triggerReason = "L7 Connection Load / Slowloris Flood"
 	}
 
+	var title, domainLine, stateLine string
+	if domain == "System" || domain == "General System" {
+		title = "🚨 CẢNH BÁO TẤN CÔNG DDoS TOÀN HỆ THỐNG"
+		domainLine = "🎯 Mục tiêu: Toàn bộ máy chủ (Global)"
+		stateLine = "🔴 Trạng thái: UNDER ATTACK (Bảo vệ toàn cầu)"
+	} else {
+		title = "🚨 CẢNH BÁO TẤN CÔNG DDoS TÊN MIỀN"
+		domainLine = fmt.Sprintf("🎯 Tên miền bị tấn công: <code>%s</code>", domain)
+		stateLine = fmt.Sprintf("🔴 Trạng thái: UNDER ATTACK (Chế độ tự động bật cho domain %s)", domain)
+	}
+
 	telegramHTML := fmt.Sprintf(
-		"🚨 <b>CẢNH BÁO TẤN CÔNG DDoS DOMAIN</b>\n"+
+		"<b>%s</b>\n"+
 			"━━━━━━━━━━━━━━━━━━━━━\n\n"+
-			"🎯 <b>Tên miền bị tấn công:</b> <code>%s</code>\n"+
+			"%s\n"+
 			"💥 <b>Loại tấn công:</b> <code>%s</code>\n"+
 			"📊 <b>Tổng lưu lượng Cluster:</b> <code>%d req/s</code>\n"+
 			"⚡ <b>Tổng Socket Cluster:</b> <code>%d conns</code>\n"+
 			"🔗 <b>Trạng thái Mesh:</b> <code>%d Nodes Online</code>\n\n"+
-			"🔴 <b>Trạng thái:</b> <b>UNDER ATTACK</b> (Chế độ tự động bật cho domain %s)\n"+
+			"%s\n"+
 			"🛡️ <b>Hành động WAF:</b> Tự động nâng cấp siết chặt bảo vệ (PoW & eBPF)\n\n"+
 			"━━━━━━━━━━━━━━━━━━━━━\n"+
 			"🥭 <i>Mango Shield Enterprise</i>",
-		domain,
+		title,
+		domainLine,
 		triggerReason,
 		totalRPS,
 		totalConns,
 		clusterSize,
-		domain,
+		stateLine,
 	)
 
+	var discordTitle, discordDesc string
+	if domain == "System" || domain == "General System" {
+		discordTitle = "🚨 CẢNH BÁO TẤN CÔNG DDoS TOÀN HỆ THỐNG"
+		discordDesc = fmt.Sprintf("Phát hiện tấn công DDoS trên **Toàn bộ máy chủ** (Tổng Cluster: **%d req/s**)", totalRPS)
+	} else {
+		discordTitle = "🚨 CẢNH BÁO TẤN CÔNG DDoS DOMAIN"
+		discordDesc = fmt.Sprintf("Phát hiện tấn công DDoS trên tên miền **%s** (Tổng Cluster: **%d req/s**)", domain, totalRPS)
+	}
+
 	discordEmbed := DiscordEmbed{
-		Title:       "🚨 CẢNH BÁO TẤN CÔNG DDoS DOMAIN",
-		Description: fmt.Sprintf("Phát hiện tấn công DDoS trên tên miền **%s** (Tổng Cluster: **%d req/s**)", domain, totalRPS),
+		Title:       discordTitle,
+		Description: discordDesc,
 		Color:       0xFF4B4B, // Red
 		Fields: []DiscordField{
-			{Name: "🎯 Tên miền", Value: fmt.Sprintf("`%s`", domain), Inline: false},
+			{Name: "🎯 Mục tiêu", Value: fmt.Sprintf("`%s`", domain), Inline: false},
 			{Name: "💥 Loại tấn công", Value: fmt.Sprintf("`%s`", triggerReason), Inline: false},
 			{Name: "📊 Tổng RPS Cluster", Value: fmt.Sprintf("`%d req/s`", totalRPS), Inline: true},
 			{Name: "⚡ Tổng Sockets Cluster", Value: fmt.Sprintf("`%d conns`", totalConns), Inline: true},
 			{Name: "🔗 Cluster Status", Value: fmt.Sprintf("`%d Nodes Online`", clusterSize), Inline: true},
-			{Name: "🔴 Trạng thái", Value: fmt.Sprintf("**UNDER ATTACK** (Chế độ tự động bật cho domain %s)", domain), Inline: false},
+			{Name: "🔴 Trạng thái", Value: "**UNDER ATTACK**", Inline: false},
 			{Name: "🛡️ Hành động WAF", Value: "Tự động nâng cấp siết chặt bảo vệ (PoW & eBPF)", Inline: false},
 		},
-		Footer: DiscordFooter{Text: "🥭 Mango Shield Enterprise"},
+		Footer: DiscordFooter{Text: "🥭 Mango Shield v3.0 Enterprise"},
 	}
 
 	a.sendAllRich(telegramHTML, discordEmbed)
@@ -220,28 +250,48 @@ func (a *AlertManager) SendDomainAttackEnd(domain string, duration time.Duration
 
 	durStr := formatDuration(duration)
 
+	var title, domainLine, stateLine string
+	if domain == "System" || domain == "General System" {
+		title = "✅ TẤN CÔNG TOÀN HỆ THỐNG ĐÃ KẾT THÚC"
+		domainLine = "🎯 Mục tiêu: Toàn bộ máy chủ (Global)"
+		stateLine = "🍀 Trạng thái: STABLE (Hệ thống trở lại bình thường)"
+	} else {
+		title = "✅ TẤN CÔNG ĐÃ KẾT THÚC"
+		domainLine = fmt.Sprintf("🎯 Tên miền: <code>%s</code>", domain)
+		stateLine = fmt.Sprintf("🍀 Trạng thái: STABLE (Domain %s trở lại bình thường)", domain)
+	}
+
 	telegramHTML := fmt.Sprintf(
-		"✅ <b>TẤN CÔNG ĐÃ KẾT THÚC</b>\n"+
+		"<b>%s</b>\n"+
 			"━━━━━━━━━━━━━━━━━━━━━\n\n"+
-			"🎯 <b>Tên miền:</b> <code>%s</code>\n"+
+			"%s\n"+
 			"⏱️ <b>Thời gian kéo dài:</b> <code>%s</code>\n"+
 			"🔒 <b>Đã chặn tổng cộng:</b> <code>%s requests</code>\n\n"+
-			"🍀 <b>Trạng thái:</b> <b>STABLE</b> (Domain %s trở lại bình thường)\n"+
+			"%s\n"+
 			"━━━━━━━━━━━━━━━━━━━━━\n"+
 			"🥭 <i>Mango Shield Enterprise</i>",
-		domain, durStr, formatNumber(blocked), domain,
+		title, domainLine, durStr, formatNumber(blocked), stateLine,
 	)
 
+	var discordTitle, discordDesc string
+	if domain == "System" || domain == "General System" {
+		discordTitle = "✅ TẤN CÔNG TOÀN HỆ THỐNG ĐÃ KẾT THÚC"
+		discordDesc = "Đã phòng thủ thành công trên **Toàn bộ máy chủ**"
+	} else {
+		discordTitle = "✅ TẤN CÔNG ĐÃ KẾT THÚC"
+		discordDesc = fmt.Sprintf("Đã phòng thủ thành công cho tên miền **%s**", domain)
+	}
+
 	discordEmbed := DiscordEmbed{
-		Title:       "✅ Tấn công đã kết thúc",
-		Description: fmt.Sprintf("Đã phòng thủ thành công cho tên miền **%s**", domain),
+		Title:       discordTitle,
+		Description: discordDesc,
 		Color:       0x00D68F, // Green
 		Fields: []DiscordField{
-			{Name: "🎯 Tên miền", Value: fmt.Sprintf("`%s`", domain), Inline: false},
+			{Name: "🎯 Mục tiêu", Value: fmt.Sprintf("`%s`", domain), Inline: false},
 			{Name: "⏱️ Thời gian", Value: durStr, Inline: true},
 			{Name: "🔒 Đã chặn", Value: formatNumber(blocked), Inline: true},
 		},
-		Footer: DiscordFooter{Text: "🥭 Mango Shield Enterprise"},
+		Footer: DiscordFooter{Text: "🥭 Mango Shield v3.0 Enterprise"},
 	}
 
 	a.sendAllRich(telegramHTML, discordEmbed)
@@ -273,36 +323,11 @@ func (a *AlertManager) SendAttackEnd(duration time.Duration, blocked int64) {
 	a.SendDomainAttackEnd("General System", duration, blocked)
 }
 
-// SendBan sends IP ban notification
+// SendBan sends IP ban notification (Disabled from Webhook to prevent spam during DDoS)
 func (a *AlertManager) SendBan(ip, reason string, duration time.Duration) {
-	if !a.canSend("ban_" + ip) {
-		return
-	}
-
-	telegramHTML := fmt.Sprintf(
-		"🔨 <b>IP ĐÃ BỊ CẤM (BAN)</b>\n"+
-			"━━━━━━━━━━━━━━━━━━━━━\n\n"+
-			"🖥️ <b>Node:</b> <code>%s</code>\n"+
-			"🔴 <b>IP:</b> <code>%s</code>\n"+
-			"📝 <b>Lý do:</b> <code>%s</code>\n"+
-			"⏱️ <b>Thời hạn:</b> <code>%s</code>\n\n"+
-			"🥭 <i>Mango Shield Enterprise</i>",
-		a.cfg.Cluster.NodeName, ip, reason, formatDuration(duration),
-	)
-
-	discordEmbed := DiscordEmbed{
-		Title: "🔨 IP đã bị cấm",
-		Color: 0xFFB800,
-		Fields: []DiscordField{
-			{Name: "🖥️ Node", Value: fmt.Sprintf("`%s`", a.cfg.Cluster.NodeName), Inline: true},
-			{Name: "🔴 IP", Value: fmt.Sprintf("`%s`", ip), Inline: true},
-			{Name: "📝 Lý do", Value: reason, Inline: true},
-			{Name: "⏱️ Thời hạn", Value: formatDuration(duration), Inline: true},
-		},
-		Footer: DiscordFooter{Text: "🥭 Mango Shield v2.2 Enterprise"},
-	}
-
-	a.sendAllRich(telegramHTML, discordEmbed)
+	// Only log to console/file, don't spam Webhooks during heavy botnet attacks
+	// where thousands of IPs are banned per minute.
+	logger.Debug("IP Banned", "ip", ip, "reason", reason, "duration", duration)
 }
 
 // SendReport sends periodic status report
@@ -327,7 +352,7 @@ func (a *AlertManager) SendReport(totalReqs, blocked, passed, bannedIPs, attacks
 			"⚔️ <b>Tấn công:</b> <code>%d lần</code>\n"+
 			"⏱️ <b>Uptime:</b> <code>%s</code>\n\n"+
 			"━━━━━━━━━━━━━━━━━━━━━\n"+
-			"🥭 <i>Mango Shield v2.2 Enterprise</i>",
+			"🥭 <i>Mango Shield v3.0 Enterprise</i>",
 		a.cfg.Cluster.NodeName,
 		formatNumber(totalReqs), formatNumber(blocked), blockRate,
 		formatNumber(passed), bannedIPs, attacks, formatDuration(uptime),
@@ -344,7 +369,7 @@ func (a *AlertManager) SendReport(totalReqs, blocked, passed, bannedIPs, attacks
 			{Name: "🚫 IP cấm", Value: fmt.Sprintf("%d", bannedIPs), Inline: true},
 			{Name: "⚔️ Tấn công", Value: fmt.Sprintf("%d", attacks), Inline: true},
 		},
-		Footer: DiscordFooter{Text: "🥭 Mango Shield v2.2 Enterprise"},
+		Footer: DiscordFooter{Text: "🥭 Mango Shield v3.0 Enterprise"},
 	}
 
 	a.sendAllRich(telegramHTML, discordEmbed)
@@ -420,12 +445,11 @@ func (a *AlertManager) sendTelegram(html string) {
 		"disable_web_page_preview": {"true"},
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
 	var lastErr error
 
 	for attempt := 0; attempt < 3; attempt++ {
-		resp, err := client.PostForm(apiURL, data)
+		resp, err := a.httpClient.PostForm(apiURL, data)
 		if err == nil {
 			if resp.StatusCode == 200 {
 				resp.Body.Close()
@@ -467,20 +491,28 @@ func (a *AlertManager) sendDiscord(embed DiscordEmbed) {
 	body, _ := json.Marshal(payload)
 	logger.Debug("Sending Discord alert", "embed_title", embed.Title)
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(cfg.WebhookURL, "application/json", bytes.NewReader(body))
-	if err != nil {
-		logger.Error("Discord gửi thất bại", "error", err)
-		return
-	}
-	defer resp.Body.Close()
+	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+	var lastErr error
 
-	if resp.StatusCode >= 400 {
-		b, _ := io.ReadAll(resp.Body)
-		logger.Error("Discord API Error", "status", resp.StatusCode, "body", string(b))
-	} else {
-		logger.Info("Discord alert sent successfully", "title", embed.Title)
+	for attempt := 0; attempt < 3; attempt++ {
+		resp, err := a.httpClient.Post(cfg.WebhookURL, "application/json", bytes.NewReader(body))
+		if err == nil {
+			if resp.StatusCode < 400 {
+				resp.Body.Close()
+				logger.Info("Discord alert sent successfully", "title", embed.Title)
+				return
+			}
+			b, _ := io.ReadAll(resp.Body)
+			lastErr = fmt.Errorf("HTTP status %d: %s", resp.StatusCode, string(b))
+			resp.Body.Close()
+		} else {
+			lastErr = err
+		}
+		if attempt < 2 {
+			time.Sleep(backoffs[attempt])
+		}
 	}
+	logger.Error("Discord gửi thất bại sau khi retry", "error", lastErr)
 }
 
 func (a *AlertManager) sendWebhook(text string) {
@@ -493,7 +525,7 @@ func (a *AlertManager) sendWebhook(text string) {
 		"message":   text,
 		"timestamp": time.Now().Format(time.RFC3339),
 		"source":    "mango-shield",
-		"version":   "2.0.0",
+		"version":   "v3.0",
 	}
 	body, _ := json.Marshal(payload)
 
@@ -506,13 +538,29 @@ func (a *AlertManager) sendWebhook(text string) {
 		req.Header.Set("X-Webhook-Secret", cfg.Secret)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		logger.Error("Webhook gửi thất bại", "error", err)
-		return
+	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+	var lastErr error
+
+	for attempt := 0; attempt < 3; attempt++ {
+		// Recreate body reader for each retry
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		
+		resp, err := a.httpClient.Do(req)
+		if err == nil {
+			if resp.StatusCode < 400 {
+				resp.Body.Close()
+				return
+			}
+			lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
+			resp.Body.Close()
+		} else {
+			lastErr = err
+		}
+		if attempt < 2 {
+			time.Sleep(backoffs[attempt])
+		}
 	}
-	resp.Body.Close()
+	logger.Error("Webhook gửi thất bại sau khi retry", "error", lastErr)
 }
 
 // ================================================
