@@ -1,0 +1,19 @@
+[Unit]
+Description=Mango Shield WAF & L7 DDoS Protection
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/mango-waf
+ExecStart=/opt/mango-waf/mango-shield -config /opt/mango-waf/config/config.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=1048576
+
+# Set Linux capabilities for eBPF/XDP
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target
