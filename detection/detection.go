@@ -51,11 +51,13 @@ type AdaptiveRateLimiter struct {
 
 // RateLimitBucket represents a rate limiter for one IP
 type RateLimitBucket struct {
-	Tokens     float64
-	MaxTokens  float64
-	RefillRate float64
-	LastRefill time.Time
-	mu         sync.Mutex
+	Tokens       float64
+	MaxTokens    float64
+	RefillRate   float64
+	LastRefill   time.Time
+	PenaltyUntil time.Time // Cooldown period when limit is breached
+	Violations   int       // Number of times the limit was breached
+	mu           sync.Mutex
 }
 
 // SessionTracker tracks user sessions
@@ -105,6 +107,28 @@ func NewEngine(cfg *config.Config) *Engine {
 	}
 
 	return e
+}
+
+// UpdateConfig updates the configuration live for hot-reloading
+func (e *Engine) UpdateConfig(cfg *config.Config) {
+	if cfg != nil {
+		e.cfg = cfg
+		if e.anomaly != nil {
+			e.anomaly.cfg = cfg
+			e.anomaly.sensitivity = cfg.Detection.Anomaly.Sensitivity
+		}
+		if e.rateLimit != nil {
+			e.rateLimit.cfg = cfg
+			// Reset all existing rate limit buckets so the new limits apply instantly to all IPs
+			e.rateLimit.counters.Range(func(key, value any) bool {
+				e.rateLimit.counters.Delete(key)
+				return true
+			})
+		}
+		if e.sessions != nil {
+			e.sessions.ttl = cfg.Detection.SessionTracking.TTL
+		}
+	}
 }
 
 // RecordRPSSample records a current RPS sample for baseline learning
@@ -176,11 +200,12 @@ type AnomalyResult struct {
 	Severity  string // low, medium, high, critical
 }
 
-// CheckRateLimit checks if an IP exceeds rate limits
-func (e *Engine) CheckRateLimit(ip string) bool {
+// CheckRateLimit checks if an IP exceeds rate limits.
+// Returns: 0 = OK, 1 = Rate Limited, 2 = Ban Required
+func (e *Engine) CheckRateLimit(ip string) int {
 	cfg := e.cfg.Protection.RateLimit
 	if !cfg.Enabled {
-		return false // Not rate limited
+		return 0 // Not rate limited
 	}
 
 	v, ok := e.rateLimit.counters.Load(ip)
@@ -197,30 +222,52 @@ func (e *Engine) CheckRateLimit(ip string) bool {
 	bucket.mu.Lock()
 	defer bucket.mu.Unlock()
 
-	// Refill tokens
 	now := time.Now()
-	elapsed := now.Sub(bucket.LastRefill).Seconds()
-	bucket.Tokens += elapsed * bucket.RefillRate
-	if bucket.Tokens > bucket.MaxTokens {
-		bucket.Tokens = bucket.MaxTokens
-	}
-	bucket.LastRefill = now
 
-	// Adaptive: increase limit for known-good IPs
+	// If currently in penalty box, deny request instantly
+	if now.Before(bucket.PenaltyUntil) {
+		bucket.Violations++
+		if bucket.Violations > 50 { // Hard ban if they spam 50 times while in penalty box
+			return 2 // Ban Required
+		}
+		return 1 // Rate limited
+	}
+
+	// Adaptive: increase limit for known-good IPs during low traffic
+	maxTokens := bucket.MaxTokens
+	refillRate := bucket.RefillRate
+
 	if cfg.Adaptive && e.baseline.avgRPS > 0 {
 		// During low traffic, be more lenient
 		if float64(atomic.LoadInt64(&currentGlobalRPS)) < e.baseline.avgRPS*0.5 {
-			bucket.Tokens += 5 // Bonus tokens
+			maxTokens += 5
+			refillRate += 2
 		}
 	}
+
+	// Refill tokens
+	elapsed := now.Sub(bucket.LastRefill).Seconds()
+	bucket.Tokens += elapsed * refillRate
+	if bucket.Tokens > maxTokens {
+		bucket.Tokens = maxTokens
+	}
+	bucket.LastRefill = now
 
 	// Try to consume a token
 	if bucket.Tokens >= 1 {
 		bucket.Tokens--
-		return false // Not rate limited
+		return 0 // OK
 	}
 
-	return true // Rate limited!
+	// Breached limit! Put them in the penalty box for 10 seconds.
+	bucket.PenaltyUntil = now.Add(10 * time.Second)
+	bucket.Violations++
+	
+	if bucket.Violations > 3 {
+		return 2 // Ban Required (Repeated rate limit breaches)
+	}
+
+	return 1 // Rate limited!
 }
 
 var currentGlobalRPS int64

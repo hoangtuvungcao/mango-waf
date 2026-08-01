@@ -455,7 +455,6 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 			}
 
 			if hits > limit {
-				atomic.AddInt64(&p.shield.stats.BlockedRequests, 1)
 				// Offload flood bot IP directly into NIC eBPF/XDP hardware map!
 				if !p.isTrustedProxy(ip) {
 					p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
@@ -466,7 +465,6 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 
 		if p.rateLimiter != nil && !p.rateLimiter.Allow(ip) {
 			logger.Info("Rate limited", "ip", ip)
-			atomic.AddInt64(&p.shield.stats.BlockedRequests, 1)
 			state := p.getState(ip)
 			state.mu.Lock()
 			state.RateLimitHits++
@@ -543,7 +541,12 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 
 	// Layer 9: Rate limiting via detection engine (adaptive token bucket)
 	if p.detEngine != nil && p.cfg.Protection.RateLimit.Enabled {
-		if p.detEngine.CheckRateLimit(ip) && !p.hasValidProof(r, ip) {
+		rlStatus := p.detEngine.CheckRateLimit(ip)
+		if rlStatus > 0 && !p.hasValidProof(r, ip) { // 1 = Rate Limited, 2 = Ban Required
+			if rlStatus == 2 {
+				// Hardware Escalation: Repeated rate limits -> XDP Driver Drop
+				p.BanIPLocal(ip, 1*time.Hour)
+			}
 			return Action{Type: ActionChallenge, Reason: "det_rate_limited", Stage: 1, Difficulty: p.cfg.Protection.Challenge.PowDifficulty}
 		}
 	}
@@ -622,7 +625,7 @@ func extractHeaders(r *http.Request) map[string]string {
 }
 
 // validateRequest performs basic request validation
-func (p *Pipeline) validateRequest(r *http.Request, ip string) Action {
+func (p *Pipeline) validateRequest(r *http.Request, _ string) Action {
 	if !p.validHost(r) {
 		return Action{Type: ActionBlock, Reason: "invalid_host"}
 	}

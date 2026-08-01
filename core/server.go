@@ -254,6 +254,11 @@ func (s *Shield) ReloadConfig(newCfg *config.Config) {
 		s.intel.UpdateConfig(newCfg)
 	}
 
+	// Update Detection Engine Config live (includes Adaptive Rate Limiter)
+	if s.detEngine != nil {
+		s.detEngine.UpdateConfig(newCfg)
+	}
+
 	// Update Alert Manager Config live
 	if s.pipeline != nil && s.pipeline.alerts != nil {
 		s.pipeline.alerts.UpdateConfig(newCfg)
@@ -727,18 +732,28 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// FAST-PATH: Verified human proof/session cookie (Zero-latency pass for clean verified visitors under DDoS)
 	if s.pipeline != nil && s.pipeline.hasValidProof(r, ip) {
 		// Anti-Abuse Rate Limit: Enforce rate limit (Token Bucket) for verified users to prevent single-IP/session flooding (> 30-50 RPS)
-		if s.pipeline.detEngine != nil && s.pipeline.detEngine.CheckRateLimit(ip) {
-			atomic.AddInt64(&s.stats.BlockedRequests, 1)
-			GetLogStore().RecordEvent("SECURITY", ip, r.Host, r.Method, r.URL.Path, http.StatusForbidden, "BLOCKED", "rate_limit", "Verified user exceeded RPS rate limit")
-			if s.challMgr != nil {
-				s.challMgr.ServeRateLimitPage(w, r, ip, 10)
-			} else {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.Header().Set("X-Mango-Shield", "rate-limited")
-				w.WriteHeader(http.StatusForbidden)
-				w.Write([]byte("403 Forbidden - Rate Limit Exceeded"))
+		if s.pipeline.detEngine != nil {
+			rlStatus := s.pipeline.detEngine.CheckRateLimit(ip)
+			if rlStatus > 0 { // 1 = Rate Limited, 2 = Ban Required
+				atomic.AddInt64(&s.stats.BlockedRequests, 1)
+				GetLogStore().RecordEvent("SECURITY", ip, r.Host, r.Method, r.URL.Path, http.StatusForbidden, "BLOCKED", "rate_limit", "Verified user exceeded RPS rate limit")
+				
+				if rlStatus == 2 {
+					// Escalation: User repeatedly breached rate limits or spammed during penalty box.
+					// Push a native eBPF/XDP drop rule for 1 hour to completely offload them from Go.
+					s.pipeline.BanIPLocal(ip, 1*time.Hour)
+				}
+
+				if s.challMgr != nil {
+					s.challMgr.ServeRateLimitPage(w, r, ip, 10)
+				} else {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.Header().Set("X-Mango-Shield", "rate-limited")
+					w.WriteHeader(http.StatusForbidden)
+					w.Write([]byte("403 Forbidden - Rate Limit Exceeded"))
+				}
+				return
 			}
-			return
 		}
 
 		// ALWAYS RUN WAF RULES INSPECTION (OWASP Top 10: SQLi, XSS, Path Traversal, RCE, Log4Shell) even for verified users
@@ -847,8 +862,18 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		if s.stats.IsUnderAttack || atomic.LoadInt64(&s.stats.CurrentRPS) > fastPathThreshold {
 			if action.Type == ActionDrop {
-				// Instantly terminate the TCP connection without sending any HTTP response!
-				// This saves massive CPU, memory, and outbound bandwidth during a flood.
+				// CLOUDFLARE-SAFE DROP: If the request came through Cloudflare proxy,
+				// we MUST send a proper HTTP response. Otherwise Cloudflare shows Error 520
+				// ("Web server returned an unknown error") to the end user.
+				if r.Header.Get("CF-Connecting-IP") != "" || r.Header.Get("CF-Ray") != "" {
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					w.Header().Set("Connection", "close")
+					w.Header().Set("X-Mango-Shield", "dropped")
+					w.WriteHeader(http.StatusForbidden)
+					w.Write([]byte("403 Forbidden"))
+					return
+				}
+				// Direct connection (no Cloudflare): silently kill TCP to save max bandwidth
 				panic(http.ErrAbortHandler)
 			}
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")

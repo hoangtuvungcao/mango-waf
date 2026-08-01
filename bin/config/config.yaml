@@ -1,5 +1,5 @@
 # ==============================================================================
-# MANGO SHIELD WAF v2.0 — Enterprise Production Configuration
+# MANGO SHIELD WAF v3.0 — Enterprise Production Configuration
 # Target Domain: firewall.hidev.dev (Cloudflare SSL Full Proxy)
 # Architecture: eBPF/XDP Kernel Filter + Go L7 Reverse Proxy Engine
 # ==============================================================================
@@ -768,13 +768,24 @@ cloudflare:
   # Purpose: Cloudflare API Token (Requires Firewall:Edit permissions)
   api_token: "YOUR_CLOUDFLARE_API_TOKEN"
 
-  # Purpose: Account ID (Blocks IP across ALL domains in your account)
-  # NOTE: Leave empty ("") if you only want to block per-zone.
-  account_id: "YOUR_CLOUDFLARE_ACCOUNT_ID"
+  # ==========================================
+  # CÁCH 1: KHÓA TRÊN TOÀN BỘ TÀI KHOẢN (ACCOUNT LEVEL)
+  # ==========================================
+  # Điền Account ID vào đây. TẤT CẢ các domain trong account sẽ chung 1 blacklist.
+  # LƯU Ý: Nếu điền giá trị ở đây, phần 'zones' bên dưới sẽ TỰ ĐỘNG BỊ BỎ QUA.
+  account_id: "" # Ví dụ: "b455c16c75b935bc3d4cac1be70853"
 
-  # Purpose: Zone IDs (Blocks IP for specific domains)
-  # Map your domains to their specific Cloudflare Zone IDs.
-  # NOTE: If account_id has a value, this zones section is ignored.
-  zones:
-    # "firewall.hidev.dev": "YOUR_ZONE_ID_HERE"
-    # "shop.trong.com": "ANOTHER_ZONE_ID_HERE"
+  # ==========================================
+  # CÁCH 2: KHÓA THEO TỪNG DOMAIN CỤ THỂ (ZONE LEVEL)
+  # ==========================================
+  # BẮT BUỘC: Bạn phải để trống account_id ("") ở trên để dùng chế độ này.
+  # Cú pháp: "Tên miền": "Zone ID"
+  zones: {}
+  
+  # ==========================================
+  # VÍ DỤ MẪU (XÓA {} Ở TRÊN VÀ BỎ DẤU # Ở DƯỚI ĐỂ DÙNG):
+  # ==========================================
+  # zones:
+  #   "firewall.hidev.dev": "11111111111111111111111111111"
+  #   "shop.trong.com": "22222222222222222222222222222"
+  #   "api.game.vn": "33333333333333333333333333333"

@@ -17,7 +17,7 @@ import (
 
 var sharedTransport = &http.Transport{
 	DialContext: (&net.Dialer{
-		Timeout:   3 * time.Second,
+		Timeout:   5 * time.Second,
 		KeepAlive: 60 * time.Second,
 	}).DialContext,
 	TLSClientConfig: &tls.Config{
@@ -27,7 +27,7 @@ var sharedTransport = &http.Transport{
 	MaxIdleConnsPerHost:   200, // Safe pool size for 2-4GB VPS nodes without FD exhaustion
 	MaxConnsPerHost:       0,   // 0 = unlimited per host so verified requests never queue
 	IdleConnTimeout:       30 * time.Second,
-	ResponseHeaderTimeout: 5 * time.Second,
+	ResponseHeaderTimeout: 15 * time.Second, // Increased from 5s to survive DDoS-induced backend slowdown
 	ExpectContinueTimeout: 1 * time.Second,
 	ForceAttemptHTTP2:     true,
 	DisableKeepAlives:     false,
@@ -73,7 +73,7 @@ func (s *Shield) getTransport() *http.Transport {
 		}
 		respTimeout := pCfg.ResponseTimeout
 		if respTimeout <= 0 {
-			respTimeout = 5 * time.Second
+			respTimeout = 15 * time.Second // Must survive DDoS-induced backend slowdown
 		}
 		connTimeout := pCfg.ConnectTimeout
 		if connTimeout <= 0 {
@@ -155,12 +155,28 @@ func (s *Shield) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		originalDirector := proxy.Director
 		proxy.Director = func(req *http.Request) {
 			originalDirector(req)
-			req.Host = req.Header.Get("X-Forwarded-Host")
+			// Preserve the original client-facing Host for the upstream backend
+			if fwdHost := req.Header.Get("X-Forwarded-Host"); fwdHost != "" {
+				req.Host = fwdHost
+			}
+			// If X-Forwarded-Host is empty, keep the Host that originalDirector set (target host)
 		}
 
 		proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+			// Check if the error is caused by the CLIENT disconnecting (not a real backend failure)
+			if r.Context().Err() != nil {
+				// Client (Cloudflare) already closed the connection.
+				// Writing anything is pointless — just return silently.
+				logger.Debug("Proxy: client disconnected before backend responded", "backend", backend, "error", err)
+				return
+			}
+			// Real backend error — send a proper response so Cloudflare does NOT show 520
 			logger.Error("Proxy error", "backend", backend, "error", err)
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("Connection", "close")
+			w.Header().Set("X-Mango-Shield", "bad-gateway")
+			w.WriteHeader(http.StatusBadGateway)
+			w.Write([]byte("<html><body style='background:#111;color:#ff9800;font-family:sans-serif;text-align:center;padding-top:80px'><h1>502 Bad Gateway</h1><p>The upstream server is temporarily unavailable. Please try again.</p><p style='color:#666;font-size:12px'>Mango Shield Enterprise</p></body></html>"))
 		}
 
 		// Intercept Response to Store in Cache & Rewrite Location redirects
