@@ -182,7 +182,7 @@ func (d *Dashboard) registerCommonRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/logs/query", d.handleLogsQuery)
 	mux.HandleFunc("/api/logs/clear", d.handleLogsClear)
 	mux.HandleFunc("/api/domains/protection-mode", d.handleDomainProtectionMode)
-	mux.HandleFunc("/api/attack-stream", d.handleAttackStream)
+	mux.HandleFunc("/api/events/security", d.handleAttackStream)
 	mux.HandleFunc("/api/firewall/bans", d.handleFirewallBans)
 	mux.HandleFunc("/logo-mango.png", d.handleLogoMango)
 	mux.HandleFunc("/logo-mango-small.png", d.handleLogoMangoSmall)
@@ -2250,6 +2250,7 @@ func (d *Dashboard) handleAttackStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	flusher, ok := w.(http.Flusher)
@@ -2270,8 +2271,10 @@ func (d *Dashboard) handleAttackStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-ticker.C:
-			logs := core.GetLogStore().QueryLogs("", "", "")
+						logs := core.GetLogStore().QueryLogs("", "", "")
 			if len(logs) == 0 {
+				fmt.Fprintf(w, ": keepalive\n\n")
+				flusher.Flush()
 				continue
 			}
 

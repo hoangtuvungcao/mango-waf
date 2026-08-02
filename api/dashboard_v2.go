@@ -3517,7 +3517,7 @@ function initAttackMap() {
   });
 
   if (window.EventSource) {
-    var evtSource = new EventSource('/api/attack-stream');
+    var evtSource = new EventSource('/api/events/security');
     evtSource.onmessage = function(e) {
       try {
         var events = JSON.parse(e.data);
