@@ -1,8 +1,8 @@
-# 🥭 Hướng Dẫn Cài Đặt & Chạy Trực Tiếp (Binary)
+#  Hướng Dẫn Cài Đặt & Chạy Trực Tiếp (Binary)
 
 Thư mục này chứa đầy đủ tất cả các thành phần để bạn chạy Mango Shield WAF trực tiếp trên máy chủ Linux mà không cần dùng Docker. Chạy trực tiếp sẽ cho hiệu năng tối đa và tích hợp XDP eBPF tốt nhất.
 
-## 📁 Cấu trúc thư mục
+##  Cấu trúc thư mục
 
 - `mango-shield`: File chạy chính (Binary đã được build sẵn cho Linux).
 - `config/config.yaml`: File cấu hình lõi của WAF.
@@ -12,7 +12,7 @@ Thư mục này chứa đầy đủ tất cả các thành phần để bạn ch
 
 ---
 
-## 🚀 Hướng Dẫn Cài Đặt (Khuyên dùng)
+##  Hướng Dẫn Cài Đặt (Khuyên dùng)
 
 Cách tốt nhất để chạy WAF là thiết lập nó thành một **Systemd Service** để nó tự động chạy khi máy chủ khởi động lại.
 
@@ -57,7 +57,7 @@ sudo systemctl status mango-shield
 
 ---
 
-## 📜 Xem Log và Kiểm soát
+##  Xem Log và Kiểm soát
 
 Vì WAF đã chạy ngầm trong Systemd, bạn có thể xem log theo thời gian thực (Realtime) bằng lệnh sau:
 ```bash
@@ -69,7 +69,7 @@ sudo journalctl -u mango-shield -f
 sudo systemctl stop mango-shield
 ```
 
-## ⚙️ Cấu hình
+##  Cấu hình
 
 Bạn chỉ cần chỉnh sửa duy nhất file `config/config.yaml`.
 Sau khi chỉnh sửa xong, hãy chạy:
@@ -78,10 +78,10 @@ sudo systemctl restart mango-shield
 ```
 WAF sẽ tự động nạp cấu hình mới.
 
-## 🛠 Yêu cầu hệ thống
+##  Yêu cầu hệ thống
 
 Để XDP/eBPF hoạt động hoàn hảo, máy chủ cần:
 - Hệ điều hành Linux (Ubuntu 20.04+, Debian 11+, CentOS 8+).
 - Cài đặt sẵn trình biên dịch C: `sudo apt install clang llvm libbpf-dev gcc make` (Ubuntu/Debian) hoặc `dnf install clang llvm libbpf-devel gcc make` (CentOS/AlmaLinux).
 
-Chúc bạn an tâm tận hưởng hệ thống bảo mật L7 siêu việt này! 🥭🛡️
+Chúc bạn an tâm tận hưởng hệ thống bảo mật L7 siêu việt này! 

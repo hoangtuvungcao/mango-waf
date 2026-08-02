@@ -68,6 +68,7 @@ type Shield struct {
 	domainUnderAttack   sync.Map // domain -> bool
 	domainAttackStart   sync.Map // domain -> time.Time
 	domainNormalCount   sync.Map // domain -> int
+	challengeFails      sync.Map // ip -> int
 	configuredTransport *http.Transport
 	transportOnce       sync.Once
 }
@@ -136,7 +137,20 @@ func New(cfg *config.Config) *Shield {
 	}
 	s.pipeline = NewPipeline(s)
 	s.challMgr.OnVerifySuccess = func(ip string) {
+		s.challengeFails.Delete(ip)
 		s.pipeline.UnbanIP(ip)
+	}
+	s.challMgr.OnVerifyFailed = func(ip string, reason string) {
+		fails := 1
+		if val, ok := s.challengeFails.Load(ip); ok {
+			fails = val.(int) + 1
+		}
+		s.challengeFails.Store(ip, fails)
+		if fails >= 3 {
+			logger.Warn("IP banned for failing challenge multiple times", "ip", ip, "reason", reason, "fails", fails)
+			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
+			s.challengeFails.Delete(ip) // reset after ban
+		}
 	}
 	GetLogStore().SetRPSPointer(&s.stats.CurrentRPS)
 	return s
@@ -695,7 +709,7 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		// Vector SVG fallback guaranteed never 404
 		w.Header().Set("Content-Type", "image/svg+xml")
-		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="32" height="32"><defs><linearGradient id="mGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient><linearGradient id="lGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad)"/></svg>`))
+		w.Write([]byte(``))
 		return
 	}
 
@@ -731,7 +745,7 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if s.pipeline != nil && s.pipeline.hasValidProof(r, ip) {
 		// Anti-Abuse Rate Limit: Enforce rate limit (Token Bucket) for verified users to prevent single-IP/session flooding (> 30-50 RPS)
 		if s.pipeline.detEngine != nil {
-			rlStatus := s.pipeline.detEngine.CheckRateLimit(ip)
+			rlStatus, remaining := s.pipeline.detEngine.CheckRateLimit(ip)
 			if rlStatus > 0 { // 1 = Rate Limited, 2 = Ban Required
 				atomic.AddInt64(&s.stats.BlockedRequests, 1)
 				GetLogStore().RecordEvent("SECURITY", ip, r.Host, r.Method, r.URL.Path, http.StatusForbidden, "BLOCKED", "rate_limit", "Verified user exceeded RPS rate limit")
@@ -744,7 +758,7 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 				if s.challMgr != nil {
 					w.Header().Set("Connection", "close") // Prevent 520
-					s.challMgr.ServeRateLimitPage(w, r, ip, 10)
+					s.challMgr.ServeRateLimitPage(w, r, ip, remaining)
 				} else {
 					w.Header().Set("Content-Type", "text/html; charset=utf-8")
 					w.Header().Set("X-Mango-Shield", "rate-limited")
@@ -855,29 +869,30 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	case ActionBlock, ActionRateLimit, ActionDrop:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
 		GetLogStore().RecordEvent("SECURITY", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusForbidden, "BLOCKED", action.Reason, fmt.Sprintf("Pipeline %v: %s", action.Type, action.Reason))
-		if action.Type == ActionDrop || action.Type == ActionRateLimit {
+		
+		if action.Type == ActionDrop {
 			if !s.pipeline.isTrustedProxy(ip) {
 				s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
 			}
-			
-			w.Header().Set("Connection", "close") // Prevent 520
+		}
 
+		w.Header().Set("Connection", "close") // Prevent 520
+
+		if action.Type == ActionRateLimit {
 			if s.challMgr != nil {
 				s.challMgr.ServeRateLimitPage(w, r, ip, 10)
 			} else {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(http.StatusForbidden)
-				w.Write([]byte("403 Forbidden - Security Drop"))
+				w.WriteHeader(http.StatusTooManyRequests)
+				w.Write([]byte("429 Too Many Requests - Rate Limit Exceeded"))
 			}
 		} else {
-			w.Header().Set("Connection", "close") // Prevent 520
-			
 			if s.challMgr != nil {
 				s.challMgr.ServeBlockPage(w, r, ip, "Security Policy", action.Reason)
 			} else {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.WriteHeader(http.StatusForbidden)
-				w.Write([]byte("403 Forbidden - Blocked by WAF Policy"))
+				w.Write([]byte("403 Forbidden - Security Drop"))
 			}
 		}
 
@@ -1186,12 +1201,12 @@ func trimSpace(s string) string {
 
 func printBanner(cfg *config.Config) {
 	banner := `
-  ╔══════════════════════════════════════════╗
-  ║                                          ║
-  ║   🥭  M A N G O   S H I E L D   v3.0     ║
-  ║       Anti-DDoS L7 Protection            ║
-  ║                                          ║
-  ╚══════════════════════════════════════════╝`
+  
+                                            
+       M A N G O   S H I E L D   v3.0     
+         Anti-DDoS L7 Protection            
+                                            
+  `
 	fmt.Println("\033[36;1m" + banner + "\033[0m")
 	fmt.Printf("\033[32m  Domains: %d | Mode: %s\033[0m\n", len(cfg.Domains), cfg.Protection.Mode)
 	fmt.Printf("\033[32m  TLS: %v | Dashboard: %v\033[0m\n\n", cfg.TLS.Enabled, cfg.Dashboard.Enabled)

@@ -1,4 +1,4 @@
-# 🥭 MANGO WAF v3.0 — Enterprise High-Performance Web Application Firewall & DDoS Shield
+#  MANGO WAF v3.0 — Enterprise High-Performance Web Application Firewall & DDoS Shield
 
 [![Go Version](https://img.shields.io/badge/Go-1.24%2B-00ADD8?style=flat-square&logo=go)](https://golang.org)
 [![HTTP/3](https://img.shields.io/badge/HTTP%2F3-QUIC-7B1FA2?style=flat-square)](https://quic-go.net)
@@ -12,19 +12,19 @@ Phiên bản 3.0 đã được tối ưu hóa ở mức cực hạn, vượt qua
 
 ---
 
-## 🔥 THÀNH TỰU VÀ CẢI TIẾN NỔI BẬT (v3.0 ENTERPRISE)
+##  THÀNH TỰU VÀ CẢI TIẾN NỔI BẬT (v3.0 ENTERPRISE)
 
-- ⚡ **HTTP/3 (QUIC over UDP 443)**: Tích hợp hoàn chỉnh HTTP/3 song song với TCP HTTPS 443, tự động chèn header `Alt-Svc: h3=":443"; ma=86400` giúp tăng tốc độ tải trang lên **3x** và miễn nhiễm với TCP SYN Flood.
-- 🛡️ **Kernel-Level eBPF/XDP Filtering**: Lọc và hủy (DROP) các gói tin DDoS cực mạnh ngay tại tầng Network Interface (NIC) trước khi đi vào bộ nhớ Socket Kernel với mức tiêu thụ CPU gần như 0%.
-- 🚀 **High Concurrency TCP Limits**: Mở rộng giới hạn File Descriptor (`LimitNOFILE: 1048576`), tối ưu Reverse Proxy Pool xử lý hơn 200,000 kết nối đồng thời. Khắc phục hoàn toàn lỗi `520 Unknown Error` trên Cloudflare khi bị nghẽn mạng do DDoS.
-- 🤖 **Smart Alert Manager & Webhook**: Hệ thống thông báo Telegram/Discord/Webhook sử dụng Shared HTTP Transport Pool và Exponential Backoff Retry. Cảnh báo chính xác 100%, nói KHÔNG với tình trạng rớt thông báo (Drop messages) hoặc treo lag (Socket Exhaustion).
-- 🌐 **P2P Mesh Cluster Synchronization**: Các VPS tự động kết nối cụm bằng HashiCorp Memberlist, chia sẻ danh sách IP bị khóa (Ban IP) thời gian thực với độ trễ <10ms.
-- 🔄 **Real-Time Hot-Reloading**: Cập nhật cấu hình bảo mật, danh sách domain, mức WAF Paranoia, Rate Limit RPS/Burst và độ khó PoW trực tiếp trong bộ nhớ RAM mà không cần restart service.
-- 🧩 **Responsive Challenge UI**: Giao diện JS Challenge và Captcha Hold-to-Verify được tối ưu CSS cho mọi thiết bị di động (Mobile-friendly), tự động co giãn không bị tràn viền khi phân tích thông tin RayID/IPv6.
+-  **HTTP/3 (QUIC over UDP 443)**: Tích hợp hoàn chỉnh HTTP/3 song song với TCP HTTPS 443, tự động chèn header `Alt-Svc: h3=":443"; ma=86400` giúp tăng tốc độ tải trang lên **3x** và miễn nhiễm với TCP SYN Flood.
+-  **Kernel-Level eBPF/XDP Filtering**: Lọc và hủy (DROP) các gói tin DDoS cực mạnh ngay tại tầng Network Interface (NIC) trước khi đi vào bộ nhớ Socket Kernel với mức tiêu thụ CPU gần như 0%.
+-  **High Concurrency TCP Limits**: Mở rộng giới hạn File Descriptor (`LimitNOFILE: 1048576`), tối ưu Reverse Proxy Pool xử lý hơn 200,000 kết nối đồng thời. Khắc phục hoàn toàn lỗi `520 Unknown Error` trên Cloudflare khi bị nghẽn mạng do DDoS.
+-  **Smart Alert Manager & Webhook**: Hệ thống thông báo Telegram/Discord/Webhook sử dụng Shared HTTP Transport Pool và Exponential Backoff Retry. Cảnh báo chính xác 100%, nói KHÔNG với tình trạng rớt thông báo (Drop messages) hoặc treo lag (Socket Exhaustion).
+-  **P2P Mesh Cluster Synchronization**: Các VPS tự động kết nối cụm bằng HashiCorp Memberlist, chia sẻ danh sách IP bị khóa (Ban IP) thời gian thực với độ trễ <10ms.
+-  **Real-Time Hot-Reloading**: Cập nhật cấu hình bảo mật, danh sách domain, mức WAF Paranoia, Rate Limit RPS/Burst và độ khó PoW trực tiếp trong bộ nhớ RAM mà không cần restart service.
+-  **Responsive Challenge UI**: Giao diện JS Challenge và Captcha Hold-to-Verify được tối ưu CSS cho mọi thiết bị di động (Mobile-friendly), tự động co giãn không bị tràn viền khi phân tích thông tin RayID/IPv6.
 
 ---
 
-## 🏗️ THIẾT KẾ KIẾN TRÚC HỆ THỐNG
+##  THIẾT KẾ KIẾN TRÚC HỆ THỐNG
 
 ```mermaid
 graph TD
@@ -46,7 +46,7 @@ graph TD
 
 ---
 
-## ⚡ KHỞI CHẠY NHANH BẰNG DOCKER COMPOSE Hoặc SERVICE
+##  KHỞI CHẠY NHANH BẰNG DOCKER COMPOSE Hoặc SERVICE
 
 ### 1. Cài đặt các gói phụ thuộc (Bắt buộc cho XDP eBPF)
 Để biên dịch mã nguồn C của XDP ở tầng hạt nhân, hệ thống cần có các trình biên dịch sau:
@@ -91,7 +91,7 @@ curl -s http://localhost:9090/api/health
 
 ---
 
-## 📁 CẤU TRÚC THƯ MỤC VÀ Ý NGHĨA
+##  CẤU TRÚC THƯ MỤC VÀ Ý NGHĨA
 
 - `bin/`: Chứa phiên bản đóng gói sẵn (Binary) và thư mục `config/` để chạy trực tiếp.
 - `config/`: Chứa file `config.yaml` và `production.yaml`. Đây là trung tâm điều khiển toàn bộ cấu hình, Rate Limit, DNS, Proxy timeout và các tính năng WAF.
@@ -102,7 +102,7 @@ curl -s http://localhost:9090/api/health
 
 ---
 
-## 📖 TÀI LIỆU HƯỚNG DẪN CHI TIẾT
+##  TÀI LIỆU HƯỚNG DẪN CHI TIẾT
 
 Vui lòng xem tài liệu thiết lập nâng cao tại **[docs/SETUP.md](docs/SETUP.md)**:
 - Cấu hình VPS 8 CPU / 8GB RAM tối ưu nhất.
@@ -112,6 +112,6 @@ Vui lòng xem tài liệu thiết lập nâng cao tại **[docs/SETUP.md](docs/S
 
 ---
 
-## 📄 LICENSE
+##  LICENSE
 
 Dự án được phát hành theo giấy phép [MIT License](LICENSE).

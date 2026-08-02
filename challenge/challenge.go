@@ -23,6 +23,7 @@ type Manager struct {
 	secret          []byte
 	verifiedIPs     sync.Map // ip -> time.Time (expiration)
 	OnVerifySuccess func(ip string)
+	OnVerifyFailed  func(ip string, reason string)
 }
 
 // ChallengeType represents the type of challenge
@@ -221,6 +222,9 @@ func (m *Manager) verifyPoW(w http.ResponseWriter, r *http.Request, ip string) b
 
 	if nonce == "" || challenge == "" {
 		logger.Debug("PoW missing nonce or challenge", "nonce", nonce, "challenge", challenge)
+		if m.OnVerifyFailed != nil {
+			m.OnVerifyFailed(ip, "pow_missing_fields")
+		}
 		return false
 	}
 
@@ -237,6 +241,9 @@ func (m *Manager) verifyPoW(w http.ResponseWriter, r *http.Request, ip string) b
 	prefix := strings.Repeat("0", diffInt)
 	if !strings.HasPrefix(hashHex, prefix) {
 		logger.Debug("PoW hash prefix mismatch", "hash", hashHex, "expected_prefix", prefix)
+		if m.OnVerifyFailed != nil {
+			m.OnVerifyFailed(ip, "pow_invalid_hash")
+		}
 		return false
 	}
 
@@ -256,6 +263,9 @@ func (m *Manager) verifyTurnstile(w http.ResponseWriter, r *http.Request, ip str
 
 	if tsStr == "" || hash == "" || data == "" {
 		logger.Debug("Turnstile missing fields", "ip", ip)
+		if m.OnVerifyFailed != nil {
+			m.OnVerifyFailed(ip, "captcha_missing_fields")
+		}
 		return false
 	}
 
@@ -263,6 +273,9 @@ func (m *Manager) verifyTurnstile(w http.ResponseWriter, r *http.Request, ip str
 	diff := time.Now().Unix() - ts
 	if err != nil || diff < -10 || diff > 300 { // 5 minutes expiry, clock skew tolerance 10s
 		logger.Debug("Turnstile expired or invalid timestamp", "ip", ip)
+		if m.OnVerifyFailed != nil {
+			m.OnVerifyFailed(ip, "captcha_expired")
+		}
 		return false
 	}
 
@@ -272,6 +285,9 @@ func (m *Manager) verifyTurnstile(w http.ResponseWriter, r *http.Request, ip str
 
 	if !hmac.Equal([]byte(hash), []byte(expected)) {
 		logger.Debug("Turnstile hash mismatch", "ip", ip)
+		if m.OnVerifyFailed != nil {
+			m.OnVerifyFailed(ip, "captcha_invalid_hash")
+		}
 		return false
 	}
 

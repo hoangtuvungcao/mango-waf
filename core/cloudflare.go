@@ -16,10 +16,15 @@ type CloudflareBanRequest struct {
 	IP string
 }
 
+type CloudflareUnbanRequest struct {
+	IP string
+}
+
 // CloudflareManager handles the worker queue for syncing bans to Cloudflare
 type CloudflareManager struct {
-	BanQueue chan CloudflareBanRequest
-	Client   *http.Client
+	BanQueue   chan CloudflareBanRequest
+	UnbanQueue chan CloudflareUnbanRequest
+	Client     *http.Client
 }
 
 // Global instance
@@ -28,11 +33,13 @@ var CFManager *CloudflareManager
 // InitCloudflareManager initializes the queue and HTTP client
 func InitCloudflareManager() {
 	CFManager = &CloudflareManager{
-		BanQueue: make(chan CloudflareBanRequest, 1000), // Buffer up to 1000 requests
+		BanQueue:   make(chan CloudflareBanRequest, 1000), // Buffer up to 1000 requests
+		UnbanQueue: make(chan CloudflareUnbanRequest, 1000),
 		Client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
+	go CFManager.RunWorker()
 }
 
 // RunWorker runs in the background and processes the queue
@@ -48,9 +55,15 @@ func (m *CloudflareManager) RunWorker() {
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 
-	for req := range m.BanQueue {
-		<-ticker.C
-		m.processBan(req, cfg)
+	for {
+		select {
+		case req := <-m.BanQueue:
+			<-ticker.C
+			m.processBan(req, cfg)
+		case req := <-m.UnbanQueue:
+			<-ticker.C
+			m.processUnban(req, cfg)
+		}
 	}
 }
 
@@ -248,6 +261,59 @@ func (m *CloudflareManager) cleanExpiredRules(cfg config.CloudflareConfig, banDu
 				break
 			}
 			page++
+		}
+	}
+}
+
+func (m *CloudflareManager) processUnban(req CloudflareUnbanRequest, cfg config.CloudflareConfig) {
+	var apiURLs []string
+	var apiDeleteURLs []string
+
+	if cfg.AccountID != "" {
+		base := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/firewall/access_rules/rules", cfg.AccountID)
+		apiURLs = append(apiURLs, base)
+		apiDeleteURLs = append(apiDeleteURLs, base)
+	} else {
+		for _, zoneID := range cfg.Zones {
+			if zoneID != "" {
+				base := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/firewall/access_rules/rules", zoneID)
+				apiURLs = append(apiURLs, base)
+				apiDeleteURLs = append(apiDeleteURLs, base)
+			}
+		}
+	}
+
+	for i, apiURL := range apiURLs {
+		reqURL := fmt.Sprintf("%s?configuration.target=ip&configuration.value=%s", apiURL, req.IP)
+		httpReq, err := http.NewRequest("GET", reqURL, nil)
+		if err != nil {
+			continue
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err := m.Client.Do(httpReq)
+		if err != nil {
+			logger.Error("Failed to fetch Cloudflare rules for unban", "ip", req.IP, "error", err)
+			continue
+		}
+
+		var cfResp cloudflareRulesResponse
+		json.NewDecoder(resp.Body).Decode(&cfResp)
+		resp.Body.Close()
+
+		for _, rule := range cfResp.Result {
+			deleteURL := fmt.Sprintf("%s/%s", apiDeleteURLs[i], rule.ID)
+			delReq, _ := http.NewRequest("DELETE", deleteURL, nil)
+			delReq.Header.Set("Authorization", "Bearer "+cfg.APIToken)
+
+			delResp, delErr := m.Client.Do(delReq)
+			if delErr == nil {
+				if delResp.StatusCode == 200 {
+					logger.Info("Successfully removed IP ban from Cloudflare", "ip", req.IP)
+				}
+				delResp.Body.Close()
+			}
 		}
 	}
 }

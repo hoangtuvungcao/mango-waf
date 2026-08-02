@@ -2227,7 +2227,7 @@ func (d *Dashboard) handleLogoMango(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "image/svg+xml")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="32" height="32"><defs><linearGradient id="mGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="50%" stop-color="#FF9800"/><stop offset="100%" stop-color="#FFC107"/></linearGradient><linearGradient id="lGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4CAF50"/><stop offset="100%" stop-color="#2E7D32"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="url(#lGrad)"/></svg>`))
+	w.Write([]byte(``))
 }
 
 func (d *Dashboard) handleLogoMangoSmall(w http.ResponseWriter, r *http.Request) {
@@ -2243,7 +2243,7 @@ func (d *Dashboard) handleLogoMangoSmall(w http.ResponseWriter, r *http.Request)
 	}
 	w.Header().Set("Content-Type", "image/svg+xml")
 	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="24" height="24"><defs><linearGradient id="mGrad2" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#FF5722"/><stop offset="100%" stop-color="#FFC107"/></linearGradient></defs><path d="M50 15 C25 15 15 35 15 60 C15 80 32 90 50 90 C72 90 85 75 85 55 C85 30 70 15 50 15 Z" fill="url(#mGrad2)"/><path d="M50 15 C55 5 65 2 75 5 C70 15 60 18 50 15 Z" fill="#4CAF50"/></svg>`))
+	w.Write([]byte(``))
 }
 
 func (d *Dashboard) handleAttackStream(w http.ResponseWriter, r *http.Request) {
@@ -2327,5 +2327,5 @@ func (d *Dashboard) handleWorldSVG(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback to empty tiny SVG if not found
-	w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2000 857" width="2000" height="857"><rect width="2000" height="857" fill="#020617"/></svg>`))
+	w.Write([]byte(``))
 }

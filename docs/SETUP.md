@@ -8,7 +8,7 @@ Tài liệu này hướng dẫn chi tiết cách cài đặt, cấu hình, biên
 
 Đây là cách cài đặt nhanh nhất để chạy WAF mà không cần biên dịch hay cài đặt môi trường Go. Bản build sẵn này được đóng gói tối giản nhất để triển khai lên máy chủ Production.
 
-### 📦 Thành phần bên trong file nén (Release Archive):
+###  Thành phần bên trong file nén (Release Archive):
 Khi giải nén file `mango-shield-linux-amd64.tar.gz` (hoặc copy từ thư mục `bin/`), bạn sẽ nhận được các file sau:
 - **`mango-shield`**: File thực thi (Binary) chính của WAF. Đã được biên dịch tĩnh, tốc độ siêu nhanh.
 - **`config/config.yaml`**: File cấu hình lõi. Nơi bạn điền danh sách IP/Domain và các thông số giới hạn.
@@ -19,7 +19,7 @@ Khi giải nén file `mango-shield-linux-amd64.tar.gz` (hoặc copy từ thư m�
 
 ---
 
-### 🚀 Hướng Dẫn Cài Đặt Từng Bước
+###  Hướng Dẫn Cài Đặt Từng Bước
 
 ```bash
 # 1. Tải bản binary mới nhất (hoặc copy từ thư mục bin/ sang)
@@ -108,7 +108,7 @@ Hệ thống sẽ tự động học hỏi và chuyển trạng thái chống DD
 ### Tại sao không có thông báo "Thống kê sau DDoS"?
 WAF được thiết kế để kết luận một cuộc tấn công kết thúc khi có **10 giây liên tục** không còn request độc hại nào tới Server (RPS tụt xuống mức bình thường).
 - Nếu bạn test DDoS và bấm `Ctrl+C` để tắt WAF **ngay lập tức** lúc đang bị DDoS hoặc vừa dừng Tool, hệ thống sẽ bị tắt ngang và **KHÔNG** kịp gửi thông báo Thống Kê.
-- **Giải pháp:** Sau khi tắt tool tấn công, hãy **chờ 10-15 giây** để WAF xác nhận cuộc tấn công hoàn toàn kết thúc. Khi đó, WAF sẽ bắn log thông báo "✅ Tấn công đã kết thúc" kèm thống kê số lượng Requests đã chặn về Discord/Telegram của bạn.
+- **Giải pháp:** Sau khi tắt tool tấn công, hãy **chờ 10-15 giây** để WAF xác nhận cuộc tấn công hoàn toàn kết thúc. Khi đó, WAF sẽ bắn log thông báo " Tấn công đã kết thúc" kèm thống kê số lượng Requests đã chặn về Discord/Telegram của bạn.
 *(Phiên bản mới nhất đã khắc phục: Ngay cả khi bạn ấn `Ctrl+C` tắt ngang Server, WAF cũng sẽ tự động xử lý và bắn thông báo thống kê lên Discord trước khi tắt).*
 
 ---

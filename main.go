@@ -57,12 +57,12 @@ func main() {
 	}
 
 	if *testConfig {
-		fmt.Printf("  ✓ Cú pháp cấu hình chuẩn xác (Syntax OK): %s\n", *configPath)
-		fmt.Printf("  ✓ Test thành công. WAF sẵn sàng khởi chạy.\n")
+		fmt.Printf("   Cú pháp cấu hình chuẩn xác (Syntax OK): %s\n", *configPath)
+		fmt.Printf("   Test thành công. WAF sẵn sàng khởi chạy.\n")
 		os.Exit(0)
 	}
 
-	fmt.Printf("  ✓ Cấu hình đã tải: %s\n", *configPath)
+	fmt.Printf("   Cấu hình đã tải: %s\n", *configPath)
 
 	// Merge persistent dynamic domains from storage without randomizing domain order
 	st := api.GetStorage()
@@ -93,31 +93,31 @@ func main() {
 		os.Exit(1)
 	}
 	defer logger.Close()
-	fmt.Printf("  ✓ Logger khởi tạo: level=%s, format=%s\n", cfg.Logging.Level, cfg.Logging.Format)
+	fmt.Printf("   Logger khởi tạo: level=%s, format=%s\n", cfg.Logging.Level, cfg.Logging.Format)
 
 	// === 3. Configure Runtime & Operating System Limits ===
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	fmt.Printf("  ✓ Runtime: GOMAXPROCS=%d\n", runtime.NumCPU())
+	fmt.Printf("   Runtime: GOMAXPROCS=%d\n", runtime.NumCPU())
 
 	var rLimit syscall.Rlimit
 	rLimit.Max = 100000
 	rLimit.Cur = 100000
 	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
-		fmt.Printf("  ⚠️ RLIMIT_NOFILE warning: %v\n", err)
+		fmt.Printf("   RLIMIT_NOFILE warning: %v\n", err)
 	} else {
-		fmt.Println("  ✓ OS Socket Limit: RLIMIT_NOFILE set to 100,000 file descriptors")
+		fmt.Println("   OS Socket Limit: RLIMIT_NOFILE set to 100,000 file descriptors")
 	}
 
 	// === 4. Initialize Fingerprint Engine ===
 	fingerprint.InitKnownBrowsers()
 	fingerprint.InitKnownH2Fingerprints()
 	fpStore := fingerprint.NewFingerprintStore()
-	fmt.Println("  ✓ Fingerprint engine: JA3/JA4/H2 databases loaded")
+	fmt.Println("   Fingerprint engine: JA3/JA4/H2 databases loaded")
 
 	// === 5. Initialize Intelligence Layer ===
 	intel := intelligence.NewIntel(cfg)
 	defer intel.Close()
-	fmt.Println("  ✓ Intelligence layer: GeoIP, Reputation, ASN, Feeds")
+	fmt.Println("   Intelligence layer: GeoIP, Reputation, ASN, Feeds")
 
 	// === 6. Initialize Detection Engine ===
 	detEngine := detection.NewEngine(cfg)
@@ -125,7 +125,7 @@ func main() {
 	botClassifier := detection.NewBotClassifier()
 	attackDetector := detection.NewAttackDetector()
 	adaptiveLearner := detection.NewAdaptiveLearner()
-	fmt.Println("  ✓ Detection engine: Behavior, Bot Classifier, Attack Detector, Adaptive")
+	fmt.Println("   Detection engine: Behavior, Bot Classifier, Attack Detector, Adaptive")
 
 	// === 7. Initialize WAF Rules Engine ===
 	wafEngine := rules.NewEngine(cfg)
@@ -134,7 +134,7 @@ func main() {
 			logger.Warn("Custom WAF rules load failed", "error", err)
 		}
 	}
-	fmt.Printf("  ✓ WAF engine: %d rules loaded (paranoia=%d)\n", len(wafEngine.GetRules()), cfg.WAF.ParanoiaLevel)
+	fmt.Printf("   WAF engine: %d rules loaded (paranoia=%d)\n", len(wafEngine.GetRules()), cfg.WAF.ParanoiaLevel)
 
 	// === 8. Initialize Performance Manager ===
 	memMgr := perf.NewMemoryManager(2048) // 2GB max
@@ -143,13 +143,13 @@ func main() {
 		float64(cfg.Protection.RateLimit.Burst),
 	)
 	degrader := perf.NewGracefulDegrader()
-	fmt.Println("  ✓ Performance: Rate Limiter, Memory Manager, Graceful Degradation")
+	fmt.Println("   Performance: Rate Limiter, Memory Manager, Graceful Degradation")
 
 	// === 9. Initialize CDN Smart Cache ===
 	if err := core.InitCDN(cfg.CDN); err != nil {
 		logger.Warn("Failed to initialize CDN", "error", err)
 	} else if cfg.CDN.Enabled {
-		fmt.Println("  ✓ CDN Caching Engine enabled (Ristretto)")
+		fmt.Println("   CDN Caching Engine enabled (Ristretto)")
 	}
 
 	// === 9.5 Initialize Cloudflare Edge Banning Worker ===
@@ -157,7 +157,7 @@ func main() {
 	go core.CFManager.RunWorker()
 	core.CFManager.StartAutoCleanup(cfg.Protection.Ban.Duration)
 	if cfg.Cloudflare.Enabled {
-		fmt.Println("  ✓ Cloudflare API Integration enabled (Background Sync)")
+		fmt.Println("   Cloudflare API Integration enabled (Background Sync)")
 	}
 
 	// === 10. Create Shield Server & Wire All Engines ===
@@ -184,7 +184,7 @@ func main() {
 	shield.SetRateLimiter(rateLimiter)
 	shield.SetGracefulDegrader(degrader)
 	shield.SetUpstreamManager(um)
-	fmt.Printf("  ✓ Shield server: domains=%d, mode=%s (ALL engines wired)\n", len(cfg.Domains), cfg.Protection.Mode)
+	fmt.Printf("   Shield server: domains=%d, mode=%s (ALL engines wired)\n", len(cfg.Domains), cfg.Protection.Mode)
 
 	// === 11. Initialize Mango P2P Mesh ===
 	if err := cluster.InitMesh(cfg.Cluster, func(ip string, duration time.Duration) {
@@ -203,7 +203,7 @@ func main() {
 				}
 			})
 		}
-		fmt.Printf("  ✓ Mango P2P Mesh enabled: Node %s (Port %d)\n", cfg.Cluster.NodeName, cfg.Cluster.BindPort)
+		fmt.Printf("   Mango P2P Mesh enabled: Node %s (Port %d)\n", cfg.Cluster.NodeName, cfg.Cluster.BindPort)
 	}
 
 	// Keep memory manager reference alive (it runs its own goroutine)
@@ -275,7 +275,7 @@ func main() {
 				logger.Error("Dashboard failed", "error", err)
 			}
 		}()
-		fmt.Printf("  ✓ Dashboard API: http://%s\n", cfg.Dashboard.Listen)
+		fmt.Printf("   Dashboard API: http://%s\n", cfg.Dashboard.Listen)
 	}
 
 	// === 12. Start Metrics Endpoint ===
@@ -332,7 +332,7 @@ func main() {
 			})
 			server := &http.Server{Addr: cfg.Metrics.Listen, Handler: mux}
 			logger.Info("Metrics endpoint started", "listen", cfg.Metrics.Listen, "path", cfg.Metrics.Path)
-			fmt.Printf("  ✓ Metrics: http://%s%s\n", cfg.Metrics.Listen, cfg.Metrics.Path)
+			fmt.Printf("   Metrics: http://%s%s\n", cfg.Metrics.Listen, cfg.Metrics.Path)
 			if err := server.ListenAndServe(); err != nil {
 				logger.Error("Metrics server failed", "error", err)
 			}
@@ -355,7 +355,7 @@ func main() {
 				}
 			case syscall.SIGINT, syscall.SIGTERM:
 				logger.Info("Shutdown signal received, stopping...")
-				fmt.Println("\n🛑 Đang dừng Mango Shield...")
+				fmt.Println("\n Đang dừng Mango Shield...")
 				shield.Stop()
 				intel.Close()
 				logger.Info("Mango Shield stopped gracefully")
@@ -365,7 +365,7 @@ func main() {
 	}()
 
 	// === 13. Start Server ===
-	fmt.Println("\n🥭 Mango Shield v3.0 — Đang bảo vệ!")
+	fmt.Println("\n Mango Shield v3.0 — Đang bảo vệ!")
 	fmt.Printf("   HTTPS: %s | HTTP: %s\n", cfg.Server.Listen, cfg.Server.HTTPListen)
 	fmt.Println("   Nhấn Ctrl+C để dừng, gửi SIGHUP để tải lại cấu hình")
 
@@ -376,10 +376,10 @@ func main() {
 
 func printBanner() {
 	fmt.Println(`
-  ╔══════════════════════════════════════╗
-  ║         🥭 MANGO SHIELD v3.0         ║
-  ║       L7 DDoS Protection & WAF       ║
-  ║      github.com/hoangtuvungcao       ║
-  ╚══════════════════════════════════════╝`)
+  
+            MANGO SHIELD v3.0         
+         L7 DDoS Protection & WAF       
+        github.com/hoangtuvungcao       
+  `)
 	fmt.Println()
 }

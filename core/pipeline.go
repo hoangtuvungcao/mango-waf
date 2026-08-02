@@ -541,7 +541,7 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 
 	// Layer 9: Rate limiting via detection engine (adaptive token bucket)
 	if p.detEngine != nil && p.cfg.Protection.RateLimit.Enabled {
-		rlStatus := p.detEngine.CheckRateLimit(ip)
+		rlStatus, _ := p.detEngine.CheckRateLimit(ip)
 		if rlStatus > 0 && !p.hasValidProof(r, ip) { // 1 = Rate Limited, 2 = Ban Required
 			if rlStatus == 2 {
 				// Hardware Escalation: Repeated rate limits -> XDP Driver Drop
@@ -1017,6 +1017,16 @@ func (p *Pipeline) UnbanIP(ip string) {
 	if mesh := cluster.GetMesh(); mesh != nil {
 		mesh.BroadcastUnban(ip)
 	}
+
+	// Push to Cloudflare Worker queue
+	if CFManager != nil {
+		select {
+		case CFManager.UnbanQueue <- CloudflareUnbanRequest{IP: ip}:
+		default:
+			logger.Warn("Cloudflare unban queue full, dropping sync request", "ip", ip)
+		}
+	}
+
 	logger.Info("IP manually unbanned", "ip", ip)
 }
 

@@ -201,11 +201,12 @@ type AnomalyResult struct {
 }
 
 // CheckRateLimit checks if an IP exceeds rate limits.
-// Returns: 0 = OK, 1 = Rate Limited, 2 = Ban Required
-func (e *Engine) CheckRateLimit(ip string) int {
+// Returns: (status, remainingSeconds)
+// status: 0 = OK, 1 = Rate Limited, 2 = Ban Required
+func (e *Engine) CheckRateLimit(ip string) (int, int) {
 	cfg := e.cfg.Protection.RateLimit
 	if !cfg.Enabled {
-		return 0 // Not rate limited
+		return 0, 0 // Not rate limited
 	}
 
 	v, ok := e.rateLimit.counters.Load(ip)
@@ -227,10 +228,14 @@ func (e *Engine) CheckRateLimit(ip string) int {
 	// If currently in penalty box, deny request instantly
 	if now.Before(bucket.PenaltyUntil) {
 		bucket.Violations++
-		if bucket.Violations > 50 { // Hard ban if they spam 50 times while in penalty box
-			return 2 // Ban Required
+		remaining := int(math.Ceil(bucket.PenaltyUntil.Sub(now).Seconds()))
+		if remaining < 1 {
+			remaining = 1
 		}
-		return 1 // Rate limited
+		if bucket.Violations > 50 { // Hard ban if they spam 50 times while in penalty box
+			return 2, remaining // Ban Required
+		}
+		return 1, remaining // Rate limited
 	}
 
 	// Adaptive: increase limit for known-good IPs during low traffic
@@ -256,18 +261,19 @@ func (e *Engine) CheckRateLimit(ip string) int {
 	// Try to consume a token
 	if bucket.Tokens >= 1 {
 		bucket.Tokens--
-		return 0 // OK
+		return 0, 0 // OK
 	}
 
 	// Breached limit! Put them in the penalty box for 10 seconds.
-	bucket.PenaltyUntil = now.Add(10 * time.Second)
+	penaltyDuration := 10 * time.Second
+	bucket.PenaltyUntil = now.Add(penaltyDuration)
 	bucket.Violations++
 	
 	if bucket.Violations > 3 {
-		return 2 // Ban Required (Repeated rate limit breaches)
+		return 2, int(penaltyDuration.Seconds()) // Ban Required (Repeated rate limit breaches)
 	}
 
-	return 1 // Rate limited!
+	return 1, int(penaltyDuration.Seconds()) // Rate limited!
 }
 
 var currentGlobalRPS int64
