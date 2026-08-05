@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 
 	"mango-waf/config"
@@ -80,11 +81,9 @@ func (s *Storage) load() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	adminUser := "admin"
-	adminPass := "admin123"
-	adminEmail := "admin@mango-shield.local"
-
 	cfg := config.Get()
+	adminUser := "admin"
+	adminPass := ""
 	if cfg != nil {
 		if cfg.Dashboard.Username != "" {
 			adminUser = cfg.Dashboard.Username
@@ -92,8 +91,8 @@ func (s *Storage) load() {
 		if cfg.Dashboard.Password != "" {
 			adminPass = cfg.Dashboard.Password
 		}
-		adminEmail = adminUser + "@mango-shield.local"
 	}
+	adminEmail := adminUser + "@mango-shield.local"
 
 	s.Data = StorageData{
 		Users: []UserAccount{
@@ -116,6 +115,17 @@ func (s *Storage) load() {
 		if err := json.Unmarshal(data, &loaded); err == nil {
 			if len(loaded.Users) > 0 {
 				s.Data.Users = loaded.Users
+				// Always dynamically sync admin user and password from config
+				for i, u := range s.Data.Users {
+					if strings.EqualFold(u.Username, adminUser) || u.Role == "super_admin" {
+						if adminUser != "" {
+							s.Data.Users[i].Username = adminUser
+						}
+						if adminPass != "" {
+							s.Data.Users[i].Password = adminPass
+						}
+					}
+				}
 			}
 			if len(loaded.Domains) > 0 {
 				s.Data.Domains = loaded.Domains

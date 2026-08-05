@@ -43,6 +43,7 @@ type Action struct {
 
 // Pre-computed stage name strings (zero allocation in hotpath)
 var stageNames = [...]string{"stage_0", "stage_1", "stage_2", "stage_3", "stage_4", "stage_5", "stage_6"}
+var lastBanQueueWarnSec, lastCFQueueWarnSec int64
 
 // Pre-compiled bad user-agent set (zero allocation per request)
 var badUASet map[string]struct{}
@@ -106,6 +107,7 @@ type IPState struct {
 	ChallengesServed int
 	ChallengesPassed int
 	RateLimitHits    int
+	ChallengeHits    int
 	CPS              int
 	ConnLastReset    time.Time
 	IsTrustedProxy   bool
@@ -278,6 +280,18 @@ func (p *Pipeline) GetAlerts() *AlertManager {
 	return p.alerts
 }
 
+func (p *Pipeline) shouldLogWarn() bool {
+	if p == nil || p.shield == nil {
+		return true
+	}
+	rps := atomic.LoadInt64(&p.shield.stats.CurrentRPS)
+	logThreshold := int64(p.cfg.Protection.Emergency.RPSThreshold * 2)
+	if logThreshold <= 0 {
+		logThreshold = 100
+	}
+	return rps < logThreshold
+}
+
 // Process runs a request through the protection pipeline (no fingerprint)
 func (p *Pipeline) Process(r *http.Request, ip string) Action {
 	return p.ProcessWithFingerprint(r, ip, nil)
@@ -318,14 +332,9 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 				if atomic.LoadInt64(&p.shield.stats.CurrentRPS) < logThreshold {
 					logger.Warn("WAF blocked malicious request", "ip", ip, "rule", wafResult.TopRule, "score", wafResult.Score, "uri", r.RequestURI)
 				}
-				// If under DDoS attack, push repeated WAF attackers directly to XDP eBPF NIC map
-				if isDomainAttack && !p.isTrustedProxy(ip) {
+				// Auto-ban malicious IP to eBPF/XDP Kernel Map on WAF rule violation for zero-CPU dropping
+				if !p.isTrustedProxy(ip) {
 					p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
-					return Action{Type: ActionDrop, Reason: "waf_attack_xdp:" + wafResult.TopRule}
-				}
-				if wafResult.Action == "drop" {
-					p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
-					return Action{Type: ActionDrop, Reason: "waf:" + wafResult.TopRule}
 				}
 				return Action{Type: ActionBlock, Reason: "waf:" + wafResult.TopRule}
 			}
@@ -361,7 +370,9 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 	if p.validator != nil {
 		if valid, reason := p.validator.Validate(r); !valid {
 			p.BanIPLocal(ip, 1*time.Hour)
-			logger.Warn("Request validation failed", "ip", ip, "reason", reason)
+			if p.shouldLogWarn() {
+				logger.Warn("Request validation failed", "ip", ip, "reason", reason)
+			}
 			return Action{Type: ActionBlock, Reason: "validation:" + reason}
 		}
 	}
@@ -377,8 +388,10 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 		if fp.JA3.Known && fp.JA3.TrustScore == 0 {
 			// Ban for 6x default duration (e.g. 60m if default is 10m)
 			p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration*6)
-			logger.Warn("Attack tool detected via JA3",
-				"ip", ip, "ja3", fp.JA3.Hash, "browser", fp.JA3.BrowserID)
+			if p.shouldLogWarn() {
+				logger.Warn("Attack tool detected via JA3",
+					"ip", ip, "ja3", fp.JA3.Hash, "browser", fp.JA3.BrowserID)
+			}
 			return Action{Type: ActionDrop, Reason: "attack_tool_ja3:" + fp.JA3.BrowserID}
 		}
 
@@ -386,8 +399,10 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 		if fp.Composite.Total < 15 {
 			// Ban for 3x default duration
 			p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration*3)
-			logger.Warn("Extremely low trust fingerprint",
-				"ip", ip, "trust", fp.Composite.Total, "verdict", fp.Composite.Verdict)
+			if p.shouldLogWarn() {
+				logger.Warn("Extremely low trust fingerprint",
+					"ip", ip, "trust", fp.Composite.Total, "verdict", fp.Composite.Verdict)
+			}
 			return Action{Type: ActionBlock, Reason: "fp_malicious"}
 		}
 
@@ -416,7 +431,9 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 			if len(evalResult.Actions) > 0 {
 				reason = "intel:" + evalResult.Actions[0]
 			}
-			logger.Warn("Intelligence blocked IP", "ip", ip, "trust", evalResult.TrustScore, "actions", evalResult.Actions)
+			if p.shouldLogWarn() {
+				logger.Warn("Intelligence blocked IP", "ip", ip, "trust", evalResult.TrustScore, "actions", evalResult.Actions)
+			}
 			return Action{Type: ActionBlock, Reason: reason}
 		}
 		if evalResult.TrustScore < 30 {
@@ -464,20 +481,14 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 		}
 
 		if p.rateLimiter != nil && !p.rateLimiter.Allow(ip) {
-			logger.Info("Rate limited", "ip", ip)
-			state := p.getState(ip)
-			state.mu.Lock()
-			state.RateLimitHits++
-			hits := state.RateLimitHits
-			state.mu.Unlock()
-
-			// If they hit the rate limit too many times without a whitelist, they are likely a bot
-			if hits > 20 {
-				p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration*2)
-				return Action{Type: ActionDrop, Reason: "rate_limit_persistent"}
+			if p.shouldLogWarn() {
+				logger.Info("Rate limited", "ip", ip)
 			}
-
-			return Action{Type: ActionRateLimit, Reason: "rate_limited"}
+			// Instant XDP eBPF kernel ban on rate limit breach for 0% CPU packet dropping
+			if !p.isTrustedProxy(ip) {
+				p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
+			}
+			return Action{Type: ActionDrop, Reason: "rate_limited"}
 		}
 	}
 
@@ -543,11 +554,10 @@ func (p *Pipeline) ProcessWithFingerprint(r *http.Request, ip string, fp *finger
 	if p.detEngine != nil && p.cfg.Protection.RateLimit.Enabled {
 		rlStatus, _ := p.detEngine.CheckRateLimit(ip)
 		if rlStatus > 0 && !p.hasValidProof(r, ip) { // 1 = Rate Limited, 2 = Ban Required
-			if rlStatus == 2 {
-				// Hardware Escalation: Repeated rate limits -> XDP Driver Drop
-				p.BanIPLocal(ip, 1*time.Hour)
+			if !p.isTrustedProxy(ip) {
+				p.BanIPLocal(ip, p.cfg.Protection.Ban.Duration)
 			}
-			return Action{Type: ActionChallenge, Reason: "det_rate_limited", Stage: 1, Difficulty: p.cfg.Protection.Challenge.PowDifficulty}
+			return Action{Type: ActionDrop, Reason: "det_rate_limited"}
 		}
 	}
 
@@ -711,7 +721,7 @@ func (p *Pipeline) determineStageWithFP(state *IPState, ip string, r *http.Reque
 		systemRPS := atomic.LoadInt64(&p.shield.stats.CurrentRPS)
 		threshold := int64(p.cfg.Protection.Emergency.RPSThreshold)
 		if threshold <= 0 {
-			threshold = 50
+			threshold = 1000
 		}
 
 		// 1. Extreme System Load (DDoS Tsunami)
@@ -724,6 +734,24 @@ func (p *Pipeline) determineStageWithFP(state *IPState, ip string, r *http.Reque
 
 		// 2. Aggregate DDoS Attack Active -> Enforce JS PoW / CAPTCHA on ALL unverified traffic!
 		if isDomainUnderAttack || systemRPS > threshold {
+			// Hardware XDP Escalation: If an unverified IP requests challenge pages > 3 times/sec
+			// without solving the challenge, it is a botnet script that does not execute JS.
+			// Escalate directly to Stage 4 (XDP Kernel Drop) to offload 100% of CPU overhead!
+			state.mu.Lock()
+			nowSec := GetFastCurrentUnixSec()
+			if nowSec != state.ConnLastReset.Unix() {
+				state.ChallengeHits = 1
+				state.ConnLastReset = time.Unix(nowSec, 0)
+			} else {
+				state.ChallengeHits++
+			}
+			cHits := state.ChallengeHits
+			state.mu.Unlock()
+
+			if cHits > 3 {
+				return 4 // Stage 4: Instant eBPF/XDP Hardware Kernel Drop
+			}
+
 			if state.RPS > limit*2 {
 				return 2 // Captcha for high RPS surge
 			}
@@ -752,11 +780,13 @@ func (p *Pipeline) determineStageWithFP(state *IPState, ip string, r *http.Reque
 				return 0
 
 			default: // Low trust: Score < 30 (Bots / Suspicious / API Scripts)
+				// If a suspicious low-trust bot surges > limit RPS, escalate instantly to Stage 4 (XDP Kernel Drop)
+				if state.RPS > limit {
+					return 4 // Stage 4: Instant eBPF/XDP Hardware Kernel Drop
+				}
 				if state.RPS > limit/2 {
 					return 2 // Fast surge from bot -> Captcha
 				}
-				// Even at 1 RPS, a suspicious bot should be JS challenged immediately
-				// to prevent massive distributed botnets from leaking 1 request per IP!
 				return 1
 			}
 		}
@@ -881,10 +911,12 @@ func (p *Pipeline) checkIsTrustedProxy(ipStr string) bool {
 		return false
 	}
 
-	// Always trust Cloudflare proxy IPs
-	for _, netObj := range defaultCloudflareNets {
-		if netObj.Contains(parsedIP) {
-			return true
+	// Only trust hardcoded Cloudflare proxy IPs if Cloudflare integration is enabled
+	if p.cfg != nil && p.cfg.Cloudflare.Enabled {
+		for _, netObj := range defaultCloudflareNets {
+			if netObj.Contains(parsedIP) {
+				return true
+			}
 		}
 	}
 
@@ -945,8 +977,13 @@ func (p *Pipeline) CheckConnRate(ip string) bool {
 	}
 
 	// Connection Per Second (CPS) limit
-	// Allow 100 CPS for modern multi-socket parallel browser connections
-	if state.CPS > 100 {
+	// Normal browsers open 6-12 parallel TCP sockets to fetch assets.
+	// Allow 50 CPS normally, 25 CPS under attack.
+	cpsLimit := 50
+	if p.shield != nil && p.shield.stats.IsUnderAttack {
+		cpsLimit = 25
+	}
+	if state.CPS > cpsLimit {
 		return false
 	}
 	return true
@@ -983,22 +1020,35 @@ func (p *Pipeline) banIP(ip string, duration time.Duration) {
 		atomic.AddInt64(&p.shield.stats.BannedIPs, 1)
 	} else {
 		p.banned.Store(ip, time.Now().Add(duration))
-		return
 	}
-	logger.Debug("IP banned", "ip", ip, "duration", duration) // Demoted to debug to save IO
+	logger.Debug("IP banned", "ip", ip, "duration", duration)
 
-	select {
-	case p.banQueue <- BanRequest{IP: ip, Duration: duration}:
-	default:
-		logger.Warn("Ban queue full, dropping OS ban request", "ip", ip)
+	// Instant microsecond-level eBPF/XDP kernel drop
+	if p.xdpMgr != nil && p.xdpMgr.Enabled && !p.isTrustedProxy(ip) {
+		if err := p.xdpMgr.BanIP(ip); err != nil {
+			logger.Warn("Instant XDP Map insertion failed", "ip", ip, "err", err)
+		}
+	} else {
+		// Fallback to legacy OS iptables queue ONLY if XDP is disabled
+		select {
+		case p.banQueue <- BanRequest{IP: ip, Duration: duration}:
+		default:
+			nowSec := GetFastCurrentUnixSec()
+			if atomic.SwapInt64(&lastBanQueueWarnSec, nowSec) != nowSec {
+				logger.Warn("OS ban queue full, dropping async queue item", "ip", ip)
+			}
+		}
 	}
 
-	// Push to Cloudflare Worker queue
+	// Push to Cloudflare Worker queue (if configured)
 	if CFManager != nil {
 		select {
 		case CFManager.BanQueue <- CloudflareBanRequest{IP: ip}:
 		default:
-			logger.Warn("Cloudflare ban queue full, dropping sync request", "ip", ip)
+			nowSec := GetFastCurrentUnixSec()
+			if atomic.SwapInt64(&lastCFQueueWarnSec, nowSec) != nowSec {
+				logger.Warn("Cloudflare ban queue full, dropping sync request", "ip", ip)
+			}
 		}
 	}
 }

@@ -129,7 +129,7 @@ func (c *SniffingConn) performSniff() {
 						info, ok := db.LookupJA3(fp.JA3.Hash)
 						if ok && info.TrustScore < 10 {
 							atomic.AddInt64(&globalEarlyRejectStats.TotalRejected, 1)
-							logger.Warn("TLS Early Reject triggered",
+							logger.Debug("TLS Early Reject triggered",
 								"ip", c.Conn.RemoteAddr().String(),
 								"ja3", fp.JA3.Hash,
 								"tool", info.Name,

@@ -110,6 +110,7 @@ type Stats struct {
 	BannedIPs       int64
 	WhitelistedIPs  int64
 	AttacksDetected int64
+	TCPEarlyRejects int64
 	Uptime          time.Time
 	IsUnderAttack   bool
 	CurrentStage    int32
@@ -448,8 +449,8 @@ func (s *Shield) Start() error {
 		TLSConfig:         tlsConfig,
 		ReadTimeout:       s.cfg.Server.ReadTimeout,
 		WriteTimeout:      s.cfg.Server.WriteTimeout,
-		IdleTimeout:       s.cfg.Server.IdleTimeout, // Aggressively drop idle connections to prevent socket exhaustion during DDoS
-		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       5 * time.Second, // Aggressively drop idle connections to prevent socket exhaustion during DDoS
+		ReadHeaderTimeout: 3 * time.Second, // Drop slowloris / header-stalling bots in 3 seconds
 		MaxHeaderBytes:    s.cfg.Server.MaxHeaderBytes,
 		ConnState: func(conn net.Conn, state http.ConnState) {
 			if state != http.StateNew && state != http.StateClosed && state != http.StateHijacked {
@@ -459,8 +460,8 @@ func (s *Shield) Start() error {
 			remoteAddr := conn.RemoteAddr().String()
 			ip, _, _ := net.SplitHostPort(remoteAddr)
 
-			// Do not apply socket-level CPS/Conn bans to trusted proxies (Cloudflare)
-			if s.pipeline.isTrustedProxy(ip) {
+			// Do not apply socket-level CPS/Conn bans to trusted proxies (Cloudflare) or whitelisted IPs
+			if s.pipeline.isTrustedProxy(ip) || s.pipeline.isWhitelisted(ip) {
 				if state == http.StateNew {
 					atomic.AddInt64(&s.stats.ActiveConns, 1)
 				} else if state == http.StateClosed || state == http.StateHijacked {
@@ -470,26 +471,31 @@ func (s *Shield) Start() error {
 				}
 				return
 			}
-
 			switch state {
 			case http.StateNew:
 				atomic.AddInt64(&s.stats.ActiveConns, 1)
 
-				// CPS Protection
-				if !s.pipeline.CheckConnRate(ip) {
-					s.pipeline.banIP(ip, s.cfg.Protection.Ban.Duration)
+				// Pre-check: If IP is already banned, close TCP socket IMMEDIATELY before TLS handshake
+				if s.pipeline.isBanned(ip) {
+					atomic.AddInt64(&s.stats.TCPEarlyRejects, 1)
 					conn.Close()
 					return
 				}
 
-				// Concurrent Connection Limit
+				// Set tight 2s deadline for TLS handshake to kill slowloris/stalled bots
+				_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+				// CPS Protection: Close excess connection without banning IP to XDP
+				if !s.pipeline.CheckConnRate(ip) {
+					conn.Close()
+					return
+				}
+
+				// Concurrent Connection Limit: Close excess connection without banning IP to XDP
 				count := s.pipeline.IncrementConnCount(ip)
 				if count > s.cfg.Protection.ConnectionLimit.MaxPerIP {
-					if !s.pipeline.isTrustedProxy(ip) && !s.pipeline.isWhitelisted(ip) {
-						s.pipeline.banIP(ip, s.cfg.Protection.Ban.Duration)
-						conn.Close()
-						return
-					}
+					conn.Close()
+					return
 				}
 			case http.StateClosed, http.StateHijacked:
 				if atomic.LoadInt64(&s.stats.ActiveConns) > 0 {
@@ -506,10 +512,10 @@ func (s *Shield) Start() error {
 		return fmt.Errorf("listen: %w", err)
 	}
 
-	// NEW: Limit concurrent connections at the listener level to avoid Goroutine OOM
+	// Limit concurrent connections at the listener level to avoid Goroutine TLS OOM
 	maxConns := s.cfg.Protection.ConnectionLimit.MaxTotal
-	if maxConns <= 0 {
-		maxConns = 50000 // default safe limit for large VPS
+	if maxConns <= 0 || maxConns > 4000 {
+		maxConns = 4000 // Strict cap for 8-11GB VPS to guarantee max ~800MB RAM for TLS buffers under HTTPS DDoS
 	}
 	baseListener = netutil.LimitListener(baseListener, maxConns)
 
@@ -541,13 +547,14 @@ func (s *Shield) GetStats() *Stats {
 	return s.stats
 }
 
-// GetXDPStats returns the stats from the XDP/eBPF engine
+// GetXDPStats returns the stats from the XDP/eBPF engine + TCP early rejects
 func (s *Shield) GetXDPStats() (bool, int64, int64) {
+	tcpRejects := atomic.LoadInt64(&s.stats.TCPEarlyRejects)
 	if s.pipeline != nil && s.pipeline.xdpMgr != nil {
 		banned, drops := s.pipeline.xdpMgr.GetStats()
-		return s.pipeline.xdpMgr.Enabled, banned, drops
+		return s.pipeline.xdpMgr.Enabled, banned, drops + tcpRejects
 	}
-	return false, 0, 0
+	return false, 0, tcpRejects
 }
 
 // SetFingerprintStore replaces the fingerprint store
@@ -856,6 +863,15 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
 		GetLogStore().RecordEvent("CHALLENGE", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusForbidden, "CHALLENGE_REQUIRED", action.Reason, "Security challenge triggered")
 		
+		// XDP ESCALATION: If an unverified IP hits challenge pages > 2 times without solving,
+		// or under heavy attack, ban IP to eBPF/XDP kernel map immediately so NIC drops future packets!
+		if !s.pipeline.isTrustedProxy(ip) && !s.pipeline.isWhitelisted(ip) {
+			hits := s.pipeline.IncrementConnCount(ip + "_ch")
+			if hits > 2 || s.stats.IsUnderAttack {
+				s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
+			}
+		}
+
 		w.Header().Set("Connection", "close") // Prevent 520 on subsequent requests
 
 		if s.challMgr != nil {
@@ -869,11 +885,11 @@ func (s *Shield) handleRequest(w http.ResponseWriter, r *http.Request) {
 	case ActionBlock, ActionRateLimit, ActionDrop:
 		atomic.AddInt64(&s.stats.BlockedRequests, 1)
 		GetLogStore().RecordEvent("SECURITY", ip, r.Host, r.Method, r.URL.RequestURI(), http.StatusForbidden, "BLOCKED", action.Reason, fmt.Sprintf("Pipeline %v: %s", action.Type, action.Reason))
-		
-		if action.Type == ActionDrop {
-			if !s.pipeline.isTrustedProxy(ip) {
-				s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
-			}
+
+		// CRITICAL 3M RPS FIX: Instantly ban blocked, rate-limited, or dropped IPs in eBPF/XDP kernel map
+		// so packet #2 from this bot is dropped at the NIC driver layer with 0% CPU!
+		if !s.pipeline.isTrustedProxy(ip) {
+			s.pipeline.BanIPLocal(ip, s.cfg.Protection.Ban.Duration)
 		}
 
 		w.Header().Set("Connection", "close") // Prevent 520
@@ -1152,30 +1168,32 @@ func (s *Shield) adaptiveSampler() {
 
 // extractIP gets real client IP from request safely
 func (s *Shield) extractIP(r *http.Request) string {
-	// Always prioritize Cloudflare connecting IP if header is present
-	if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
-		return trimSpace(cfip)
-	}
-
-	// Always check X-Forwarded-For or X-Real-IP if present
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := splitFirst(xff, ",")
-		ip := trimSpace(parts)
-		if ip != "" {
-			return ip
-		}
-	}
-	if xri := r.Header.Get("X-Real-IP"); xri != "" {
-		ip := trimSpace(xri)
-		if ip != "" {
-			return ip
-		}
-	}
-
 	peerHost, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		peerHost = r.RemoteAddr
 	}
+
+	// ONLY trust proxy headers (CF-Connecting-IP, X-Forwarded-For) if direct socket connection is from a trusted proxy
+	if s.pipeline != nil && (s.pipeline.isTrustedProxy(peerHost) || s.pipeline.checkIsTrustedProxy(peerHost)) {
+		if cfip := r.Header.Get("CF-Connecting-IP"); cfip != "" {
+			return trimSpace(cfip)
+		}
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := splitFirst(xff, ",")
+			ip := trimSpace(parts)
+			if ip != "" {
+				return ip
+			}
+		}
+		if xri := r.Header.Get("X-Real-IP"); xri != "" {
+			ip := trimSpace(xri)
+			if ip != "" {
+				return ip
+			}
+		}
+	}
+
+	// For direct TCP socket connections (not via trusted proxy), the ONLY real client IP is peerHost
 	return peerHost
 }
 

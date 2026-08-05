@@ -304,10 +304,18 @@ func (d *Dashboard) handleLogin(w http.ResponseWriter, r *http.Request) {
 	st.mu.RUnlock()
 
 	if authUser == nil {
-		uMatch := subtle.ConstantTimeCompare([]byte(req.Username), []byte(config.GetCenter().GetConfig().Dashboard.Username)) == 1
-		pMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(config.GetCenter().GetConfig().Dashboard.Password)) == 1
-		if uMatch && pMatch {
-			authUser = &UserAccount{Username: req.Username, Role: "admin"}
+		cfgUser := ""
+		cfgPass := ""
+		if c := config.Get(); c != nil {
+			cfgUser = c.Dashboard.Username
+			cfgPass = c.Dashboard.Password
+		}
+		if cfgUser != "" && cfgPass != "" {
+			uMatch := subtle.ConstantTimeCompare([]byte(req.Username), []byte(cfgUser)) == 1
+			pMatch := subtle.ConstantTimeCompare([]byte(req.Password), []byte(cfgPass)) == 1
+			if uMatch && pMatch {
+				authUser = &UserAccount{Username: req.Username, Role: "admin"}
+			}
 		}
 	}
 

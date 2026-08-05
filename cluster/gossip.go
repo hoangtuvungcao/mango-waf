@@ -102,20 +102,20 @@ func (d *delegate) NotifyMsg(b []byte) {
 			return
 		}
 		if banMsg.Action == "unban" {
-			logger.Info("Received Unban Sync from Mesh", "ip", banMsg.IP, "source", banMsg.Source)
+			logger.Debug("Received Unban Sync from Mesh", "ip", banMsg.IP, "source", banMsg.Source)
 			if d.node.unbanHandler != nil {
 				d.node.unbanHandler(banMsg.IP)
 			}
 			return
 		}
 		if banMsg.Action == "unban_all" {
-			logger.Info("Received UnbanAll Sync from Mesh", "source", banMsg.Source)
+			logger.Debug("Received UnbanAll Sync from Mesh", "source", banMsg.Source)
 			if d.node.unbanHandler != nil {
 				d.node.unbanHandler("all")
 			}
 			return
 		}
-		logger.Info("Received Ban Sync from Mesh", "ip", banMsg.IP, "source", banMsg.Source)
+		logger.Debug("Received Ban Sync from Mesh", "ip", banMsg.IP, "source", banMsg.Source)
 		if d.node.banHandler != nil {
 			d.node.banHandler(banMsg.IP, banMsg.Duration)
 		}
@@ -343,7 +343,7 @@ func (n *MeshNode) BroadcastBan(ip string, duration time.Duration) {
 	}
 
 	n.broadcasts.QueueBroadcast(&banBroadcast{msg: b})
-	logger.Info("Broadcasted Ban to Mesh", "ip", ip)
+	logger.Debug("Broadcasted Ban to Mesh", "ip", ip)
 }
 
 // BroadcastUnban sends an unban command to all other Edge nodes in the mesh

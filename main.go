@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"syscall"
@@ -46,6 +47,17 @@ func main() {
 		fmt.Printf("Mango Shield v%s (build: %s, go: %s)\n", version, buildDate, runtime.Version())
 		os.Exit(0)
 	}
+
+	// Set soft GOMEMLIMIT (2.5 GiB) to force aggressive GC sweeps under heavy HTTPS DDoS before OS OOM killer
+	debug.SetMemoryLimit(2500 * 1024 * 1024)
+
+	// GOGC=20: trigger GC when heap grows by 20% instead of default 100%.
+	// This keeps heap small at the cost of more frequent GC cycles.
+	// Critical for HTTPS DDoS: each TLS conn allocates ~32KB, 10K conns = 320MB heap growth.
+	// With GOGC=100 (default), GC only fires at 640MB → OOM before GC can help.
+	// With GOGC=20, GC fires at 64MB growth → keeps memory manageable.
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	debug.SetGCPercent(20)
 
 	printBanner()
 

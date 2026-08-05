@@ -2,12 +2,15 @@ package core
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"os/user"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"mango-waf/config"
 	"mango-waf/logger"
@@ -17,14 +20,18 @@ import (
 
 // XDPManager provides a high-performance eBPF/XDP mapping interface for hardware-level dropping
 type XDPManager struct {
-	Enabled bool
-	MapName string
-	bpfMap  *ebpf.Map
+	Enabled       bool
+	MapName       string
+	bpfMap        *ebpf.Map
+	lifetimeDrops int64
+	lastObserved  map[uint32]uint64
+	mu            sync.Mutex
 }
 
 func NewXDPManager(cfg *config.Config) *XDPManager {
 	x := &XDPManager{
-		MapName: "blacklist",
+		MapName:      "blacklist",
+		lastObserved: make(map[uint32]uint64),
 	}
 
 	if cfg == nil || !cfg.XDP.Enabled {
@@ -43,33 +50,17 @@ func NewXDPManager(cfg *config.Config) *XDPManager {
 		x.ensureAttached(cfg)
 	}
 
-	// 3. Try to open pinned map descriptor at configured or fallback paths
-	pinPaths := []string{
-		cfg.XDP.MapPinPath,
-		"/sys/fs/bpf/mango_blacklist",
-		"/sys/fs/bpf/blacklist",
-		"/sys/fs/bpf/tc/globals/blacklist",
+	pinPath := cfg.XDP.MapPinPath
+	if pinPath == "" {
+		pinPath = "/sys/fs/bpf/mango_blacklist"
 	}
 
-	for _, pinPath := range pinPaths {
-		if pinPath == "" {
-			continue
-		}
-		m, err := ebpf.LoadPinnedMap(pinPath, nil)
-		if err == nil && m != nil {
-			x.bpfMap = m
-			x.Enabled = true
-			logger.Info("XDP eBPF Native Map loaded via cilium/ebpf", "path", pinPath)
-			return x
-		}
-	}
-
-	// 4. Try to find the active unpinned map created by ip link
+	// 3. PRIORITIZE: Discover the active eBPF map ID created by attached XDP program
 	var mapID ebpf.MapID
-	var err error
+	var mapErr error
 	for {
-		mapID, err = ebpf.MapGetNextID(mapID)
-		if err != nil {
+		mapID, mapErr = ebpf.MapGetNextID(mapID)
+		if mapErr != nil {
 			break
 		}
 		m, err := ebpf.NewMapFromID(mapID)
@@ -81,22 +72,39 @@ func NewXDPManager(cfg *config.Config) *XDPManager {
 			x.bpfMap = m
 			x.Enabled = true
 
-			// Pin it for future restarts
-			pinPath := cfg.XDP.MapPinPath
-			if pinPath == "" {
-				pinPath = "/sys/fs/bpf/mango_blacklist"
-			}
+			// Force unpin stale path and re-pin to active map ID
+			_ = os.Remove(pinPath)
 			if err := m.Pin(pinPath); err == nil {
-				logger.Info("Discovered active XDP map and pinned it", "id", mapID, "path", pinPath)
+				logger.Info("Discovered active XDP map ID and re-pinned it successfully", "id", mapID, "path", pinPath)
 			} else {
-				logger.Info("Discovered active XDP map but pinning failed (already pinned?)", "id", mapID)
+				logger.Info("Discovered active XDP map ID", "id", mapID)
 			}
 			return x
 		}
 		m.Close()
 	}
 
-	// 5. Create standalone BPF hash map if not found
+	// 4. Fallback: Try to open pinned map descriptor if kernel scan did not yield map
+	pinPaths := []string{
+		pinPath,
+		"/sys/fs/bpf/mango_blacklist",
+		"/sys/fs/bpf/blacklist",
+		"/sys/fs/bpf/tc/globals/blacklist",
+	}
+	for _, p := range pinPaths {
+		if p == "" {
+			continue
+		}
+		m, err := ebpf.LoadPinnedMap(p, nil)
+		if err == nil && m != nil {
+			x.bpfMap = m
+			x.Enabled = true
+			logger.Info("XDP eBPF Native Map loaded via pinned file", "path", p)
+			return x
+		}
+	}
+
+	// 5. Create standalone BPF hash map if not found anywhere
 	if _, err := os.Stat("/sys/fs/bpf"); err == nil {
 		spec := &ebpf.MapSpec{
 			Name:       "blacklist",
@@ -110,10 +118,7 @@ func NewXDPManager(cfg *config.Config) *XDPManager {
 			x.bpfMap = m
 			x.Enabled = true
 
-			pinPath := cfg.XDP.MapPinPath
-			if pinPath == "" {
-				pinPath = "/sys/fs/bpf/mango_blacklist"
-			}
+			_ = os.Remove(pinPath)
 			if err := m.Pin(pinPath); err == nil {
 				logger.Info("XDP eBPF blacklist map created and pinned", "path", pinPath)
 			}
@@ -143,21 +148,15 @@ func (x *XDPManager) ensureAttached(cfg *config.Config) {
 		return
 	}
 
-	out, err := exec.Command("ip", "link", "show", "dev", nic).Output()
-	if err == nil && strings.Contains(string(out), "xdp") {
-		logger.Info("XDP filter already attached to network interface", "interface", nic)
-		return
-	}
-
 	objFile := "xdp/mango_xdp.o"
-	if _, err := os.Stat(objFile); os.IsNotExist(err) {
-		if cfg.XDP.AutoCompile {
-			if _, err := exec.LookPath("clang"); err == nil {
-				archPath := fmt.Sprintf("/usr/include/%s-linux-gnu", getMachineArch())
-				cmd := exec.Command("clang", "-O2", "-g", "-target", "bpf", "-c", "xdp/mango_xdp.c", "-o", objFile, "-I"+archPath, "-I/usr/include")
-				if err := cmd.Run(); err == nil {
-					logger.Info("Auto-compiled xdp/mango_xdp.c successfully")
-				}
+	if cfg.XDP.AutoCompile {
+		if _, err := exec.LookPath("clang"); err == nil {
+			archPath := fmt.Sprintf("/usr/include/%s-linux-gnu", getMachineArch())
+			cmd := exec.Command("clang", "-O2", "-g", "-target", "bpf", "-c", "xdp/mango_xdp.c", "-o", objFile, "-I"+archPath, "-I/usr/include")
+			if err := cmd.Run(); err == nil {
+				logger.Info("Auto-compiled xdp/mango_xdp.c to fresh BPF object successfully")
+			} else {
+				logger.Warn("Clang compilation of xdp/mango_xdp.c failed", "error", err)
 			}
 		}
 	}
@@ -172,19 +171,16 @@ func (x *XDPManager) ensureAttached(cfg *config.Config) {
 		if cfg.XDP.Mode == "drv" || cfg.XDP.Mode == "native" {
 			modeFlag = "xdpdrv"
 		}
+
+		// Detach old XDP filter to guarantee fresh bytecode loading
+		_ = exec.Command("ip", "link", "set", "dev", nic, "xdp", "off").Run()
+		_ = exec.Command("ip", "link", "set", "dev", nic, "xdpgeneric", "off").Run()
+
 		cmd := exec.Command("ip", "link", "set", "dev", nic, modeFlag, "obj", objFile, "sec", "xdp_mango")
 		if err := cmd.Run(); err != nil {
 			logger.Warn("Failed to auto-attach XDP to network interface", "interface", nic, "error", err)
 		} else {
-			logger.Info("Auto-attached XDP filter to network interface", "interface", nic, "mode", modeFlag)
-
-			pinPath := cfg.XDP.MapPinPath
-			if pinPath == "" {
-				pinPath = "/sys/fs/bpf/mango_blacklist"
-			}
-			if _, err := os.Stat(pinPath); os.IsNotExist(err) {
-				_ = exec.Command("bpftool", "map", "pin", "name", "blacklist", pinPath).Run()
-			}
+			logger.Info("Freshly attached XDP filter to network interface", "interface", nic, "mode", modeFlag)
 		}
 	}
 }
@@ -223,11 +219,21 @@ func (x *XDPManager) BanIP(ipAddr string) error {
 	}
 	ipv4 := parsedIP.To4()
 
-	key := binary.BigEndian.Uint32(ipv4)
+	// LittleEndian.Uint32 produces the correct byte layout in x86 memory
+	// that matches ip->saddr as read by the XDP kernel program on LE CPUs.
+	key := binary.LittleEndian.Uint32(ipv4)
 	var val uint64 = 0
 
-	err := x.bpfMap.Update(&key, &val, ebpf.UpdateAny)
+	// Use UpdateNoExist: only insert if not already present.
+	// This preserves the existing XDP kernel drop counter that gets
+	// atomically incremented by __sync_fetch_and_add() in the C BPF program.
+	// If we used UpdateAny, we'd reset the counter to 0 on every ban refresh.
+	err := x.bpfMap.Update(&key, &val, ebpf.UpdateNoExist)
 	if err != nil {
+		// Already banned (key exists) - do NOT reset the drop counter
+		if errors.Is(err, ebpf.ErrKeyExist) || strings.Contains(strings.ToLower(err.Error()), "exist") {
+			return nil
+		}
 		return fmt.Errorf("cilium/ebpf map update failed: %w", err)
 	}
 	return nil
@@ -245,7 +251,7 @@ func (x *XDPManager) UnbanIP(ipAddr string) error {
 	}
 	ipv4 := parsedIP.To4()
 
-	key := binary.BigEndian.Uint32(ipv4)
+	key := binary.LittleEndian.Uint32(ipv4)
 	err := x.bpfMap.Delete(&key)
 	if err != nil && !strings.Contains(err.Error(), "key does not exist") {
 		return fmt.Errorf("cilium/ebpf map delete failed: %w", err)
@@ -256,24 +262,40 @@ func (x *XDPManager) UnbanIP(ipAddr string) error {
 // GetStats returns the number of IPs currently in the hardware blacklist and total packets dropped natively
 func (x *XDPManager) GetStats() (int64, int64) {
 	if !x.Enabled || x.bpfMap == nil {
-		return 0, 0
+		return 0, atomic.LoadInt64(&x.lifetimeDrops)
 	}
 
 	var count int64
-	var totalDrops int64
+	var currentActiveDrops int64
 
-	var key uint32
-	var value uint64
+	x.mu.Lock()
+	if x.lastObserved == nil {
+		x.lastObserved = make(map[uint32]uint64)
+	}
 
 	iter := x.bpfMap.Iterate()
+	var key uint32
+	var value uint64
 	for iter.Next(&key, &value) {
 		count++
-		totalDrops += int64(value)
+		currentActiveDrops += int64(value)
+
+		oldVal := x.lastObserved[key]
+		if value > oldVal {
+			diff := int64(value - oldVal)
+			atomic.AddInt64(&x.lifetimeDrops, diff)
+			x.lastObserved[key] = value
+		}
 	}
 
 	if err := iter.Err(); err != nil {
 		logger.Warn("Failed to iterate BPF map", "error", err)
 	}
+	x.mu.Unlock()
 
-	return count, totalDrops
+	lifetime := atomic.LoadInt64(&x.lifetimeDrops)
+	if lifetime > currentActiveDrops {
+		return count, lifetime
+	}
+	return count, currentActiveDrops
 }

@@ -1,0 +1,22 @@
+[Unit]
+Description=Mango WAF Security Service
+After=network.target remote-fs.target ntp.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/mango-waf
+ExecStart=/opt/mango-waf/bin/mango-waf -config /opt/mango-waf/config/config.yaml
+Restart=always
+RestartSec=3s
+LimitNOFILE=1048576
+LimitNPROC=512000
+LimitMEMLOCK=infinity
+TasksMax=infinity
+OOMScoreAdjust=-900
+Environment=GOMEMLIMIT=4GiB
+Environment=GOMAXPROCS=0
+
+[Install]
+WantedBy=multi-user.target
